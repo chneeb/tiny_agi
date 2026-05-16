@@ -54,5 +54,6 @@ typedef struct {
 extern agi_heap_t heap_data;
 
 void heap_reset();
+void heap_full_reset(void);
 void heap_write_script_entry(uint8_t script_type, uint8_t resource_no);
 void heap_write_add_to_pic_script_entry(uint8_t view_no, uint8_t loop_no, uint8_t cel_no, uint8_t x, uint8_t y, uint8_t pri);

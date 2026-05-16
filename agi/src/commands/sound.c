@@ -14,10 +14,11 @@ void load_sound(uint8_t num) {
 }
 
 void sound(uint8_t num, uint8_t flag) {
+	if (state.sound_flag != -1)
+		return;
 	state.sound_flag = flag;
 	state.flags[flag] = false;
 	agi_play_sound(heap_data.loaded_sounds[num].buffer);
-	// stop_sound();
 }
 
 void stop_sound() {

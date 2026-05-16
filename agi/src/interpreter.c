@@ -1,5 +1,6 @@
 #include <string.h>
 #include <ctype.h>
+#include <stdio.h>
 
 #include "state.h"
 #include "heap.h"
@@ -214,7 +215,12 @@ action_t actions[] = {
 const char* get_message(uint8_t logic_no, uint16_t message_no) {
 	message_no--;
 	uint8_t* buffer = heap_data.loaded_logics[logic_no].buffer;
+	if (!buffer) return "";
 	uint8_t* message_section = buffer + ((buffer[1] << 8) | buffer[0]) + 2;
+
+	// message_section[0] is the message count; guard against out-of-range index
+	// (also catches the message_no=0 → uint16_t underflow-to-65535 case).
+	if (message_no >= message_section[0]) return "";
 
 	uint8_t* message_offset = (message_section + 3 + 2 * message_no);
 	uint16_t offset = *(message_offset) | (*(message_offset + 1) << 8);
@@ -321,14 +327,16 @@ void step() {
 				state.and_result = state.and_result && pass;
 		}
 		else {
-			//printf("Logic %d: %s\n", state.current_logic, actions[opcode].name);
 			switch (actions[opcode].numArgs) {
 			case 0:
 				actions[opcode].action();
 				break;
 			case 1:
-				actions[opcode].action(next_data());
-				break;
+			{
+				uint8_t a = next_data();
+				actions[opcode].action(a);
+			}
+			break;
 			case 2:
 			{
 				uint8_t a = next_data();
@@ -448,6 +456,9 @@ void process_input_game(input_queue_entry_t entry) {
 	else if (entry.scancode == AGI_KEY_LEFT) {
 		state.variables[VAR_6_EGO_DIRECTION] = state.variables[VAR_6_EGO_DIRECTION] == DIR_LEFT ? DIR_STOPPED : DIR_LEFT;
 	}
+	else if (entry.scancode == AGI_KEY_F1) {
+		menu_input();
+	}
 	else if (entry.scancode == AGI_KEY_F3) {
 		strcpy(system_state.input_buffer, system_state.prev_input_buffer);
 		system_state.input_pos = system_state.prev_input_pos;
@@ -502,6 +513,12 @@ void process_input_menu(input_queue_entry_t entry) {
 
 	menu_header_t* menu = *system_state.current_menu;
 	menu_item_t* menu_item = *system_state.current_menu_item;
+
+	if (!menu || !menu_item) {
+		show_pic();
+		redraw_menu();
+		return;
+	}
 
 	if (entry.scancode == AGI_KEY_UP) {
 		if (menu_item->prev != NULL) {
@@ -593,7 +610,8 @@ bool agi_logic_run_cycle(uint32_t now_ms) {
 
 		if (state.game_state == STATE_MENU) {
 			if (state.enter_pressed) {
-				state.controllers[(*system_state.current_menu_item)->controller] = true;
+				menu_item_t* sel = *system_state.current_menu_item;
+				if (sel) state.controllers[sel->controller] = true;
 				close_menu();
 			}
 		}
@@ -649,7 +667,8 @@ bool agi_logic_run_cycle(uint32_t now_ms) {
 			state.flags[FLAG_6_RESTART_GAME_EXECUTED] = false;
 			state.flags[FLAG_12_GAME_RESTORED] = false;
 
-			update_all_active();
+			if (state.game_state == STATE_PLAYING)
+				update_all_active();
 		}
 
 		return true;
@@ -658,6 +677,7 @@ bool agi_logic_run_cycle(uint32_t now_ms) {
 }
 
 void agi_initialize() {
+	heap_full_reset();
 	state_reset();
 	state_system_reset();
 	state.flags[FLAG_5_ROOM_EXECUTED_FIRST_TIME] = true;

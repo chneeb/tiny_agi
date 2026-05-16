@@ -48,7 +48,12 @@ void program_control() {
 }
 
 void quit(uint8_t noConfirm) {
-	panic("Logic called quit");
+	if (!noConfirm) {
+		show_pic();
+		print_message_box("Quit game?\n(Y)es or (N)o", 25, 0, 0);
+		if (!wait_for_key_yn()) return;
+	}
+	state.game_state = STATE_QUIT;
 }
 
 void restart_game() {

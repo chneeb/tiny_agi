@@ -1,4 +1,5 @@
 #include <string.h>
+#include <stdio.h>
 
 #include "menu.h"
 #include "state.h"
@@ -6,7 +7,7 @@
 #include "actions.h"
 #include "constants.h"
 
-void redraw_menu() {	
+void redraw_menu() {
 	uint8_t row = 0;
 	uint8_t col = 1;
 	_draw_char(0, 0, ' ', 0, 15);
@@ -39,6 +40,7 @@ void redraw_menu() {
 
 	
 	menu = *system_state.current_menu;
+	if (!menu) return;
 	menu_item_t* menu_item = menu->first_item;
 	int right_col = 0;
 	row = 2;

@@ -70,6 +70,33 @@ void heap_reset() {
 	}
 }
 
+// Full reset for game switching: frees everything including logic 0,
+// forces reload of all game-specific files on next new_room().
+void heap_full_reset(void) {
+	for (size_t i = 0; i < 256; i++) {
+		discard_vol_data(&heap_data.loaded_logics[i]);
+		discard_vol_data(&heap_data.loaded_pics[i]);
+		discard_vol_data(&heap_data.loaded_views[i]);
+		discard_vol_data(&heap_data.loaded_sounds[i]);
+	}
+
+	if (heap_data.item_file) {
+		free(heap_data.item_file);
+		heap_data.item_file = NULL;
+	}
+	if (heap_data.words_file) {
+		free(heap_data.words_file);
+		heap_data.words_file = NULL;
+	}
+
+	if (heap_data.script_entries) {
+		free(heap_data.script_entries);
+		heap_data.script_entries = NULL;
+	}
+	heap_data.script_size = 0;
+	heap_data.script_entry_pos = 0;
+}
+
 void heap_write_script_entry(uint8_t script_type, uint8_t resource_no) {
 	if (state.flags[FLAG_7_SCRIPT_BUFFER_WRITE_LOCK]) {
 		return;

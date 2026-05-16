@@ -1,0 +1,3 @@
+[submodule "tinyagi-picocalc/fatfs"]
+	path = tinyagi-picocalc/fatfs
+	url = https://github.com/carlk3/no-OS-FatFS-SD-SPI-RPi-Pico.git

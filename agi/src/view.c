@@ -6,17 +6,23 @@
 
 uint8_t _view_num_loops(uint8_t view_no) {
 	view_t* view = (view_t*)(heap_data.loaded_views[view_no].buffer);
+	if (!view) return 1;
 	return view->num_loops;
 }
 
 uint8_t _view_num_cels(uint8_t view_no, uint8_t loop_no) {
 	view_t* view = (view_t*)(heap_data.loaded_views[view_no].buffer);
+	if (!view) return 1;
 	loop_t* loop = (loop_t*)((uint8_t*)(view)+view->loop_offsets[loop_no]);
 	return loop->num_cells;
 }
 
 viewinfo_t view_get_show_obj_info(uint8_t view_no) {
 	view_t* view = (view_t*)(heap_data.loaded_views[view_no].buffer);
+	if (!view) {
+		viewinfo_t empty = { 0, 0, "" };
+		return empty;
+	}
 	loop_t* loop = (loop_t*)((uint8_t*)(view)+view->loop_offsets[0]);
 	cell_t* cell = (cell_t*)((uint8_t*)(loop)+loop->cell_offsets[0]);
 
@@ -29,6 +35,7 @@ viewinfo_t view_get_show_obj_info(uint8_t view_no) {
 
 cell_t* _get_cell(uint8_t view_no, uint8_t loop_no, uint8_t cel_no) {
 	view_t* view = (view_t*)(heap_data.loaded_views[view_no].buffer);
+	if (!view) return NULL;
 	loop_t* loop = (loop_t*)((uint8_t*)(view)+view->loop_offsets[loop_no]);
 	cell_t* cell = (cell_t*)((uint8_t*)(loop)+loop->cell_offsets[cel_no]);
 	return cell;
@@ -50,6 +57,7 @@ uint8_t _get_pri(int x, int y, bool add_to_pic) {
 
 void _draw_view(uint8_t view_no, uint8_t loop_no, uint8_t cel_no, uint8_t x, uint8_t y, uint8_t priority, bool erase, bool add_to_pic) {
 	view_t* view = (view_t*)(heap_data.loaded_views[view_no].buffer);
+	if (!view) return;
 	loop_t* loop = (loop_t*)((uint8_t*)(view)+view->loop_offsets[loop_no]);
 	cell_t* cell = (cell_t*)((uint8_t*)(loop)+loop->cell_offsets[cel_no]);
 	uint8_t transparentColor = cell->transparent_color_and_mirroring & 0x0F;

@@ -2,6 +2,7 @@
 
 #define STATE_PLAYING 0
 #define STATE_MENU 1
+#define STATE_QUIT 2
 
 #define VERTICAL_BAR (unsigned char)0xB3
 #define HORIZONTAL_BAR (unsigned char)0xC4

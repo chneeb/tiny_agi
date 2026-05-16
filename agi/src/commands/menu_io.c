@@ -7,11 +7,11 @@
 #include "../menu.h"
 
 void disable_item(uint8_t ctr) {
-	UNIMPLEMENTED
+	(void)ctr;	// menu item enable/disable not implemented
 }
 
 void enable_item(uint8_t ctr) {
-	UNIMPLEMENTED
+	(void)ctr;
 }
 
 void hold_key() {
@@ -22,7 +22,8 @@ void menu_input() {
 	if (state.flags[FLAG_14_MENU_ENABLED]) {
 		state.game_state = STATE_MENU;
 		system_state.current_menu = &system_state.first_menu;
-		system_state.current_menu_item = &system_state.first_menu->first_item;
+		if (system_state.first_menu)
+			system_state.current_menu_item = &system_state.first_menu->first_item;
 		redraw_menu();
 	}
 }

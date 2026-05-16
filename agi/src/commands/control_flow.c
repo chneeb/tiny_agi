@@ -54,6 +54,12 @@ void new_room(uint8_t room_no)
 {
 	stop_sound();
 
+	// Clear the player's input buffer so the previous room's typed text
+	// (or text placed there by parse()) doesn't appear in the next room's prompt.
+	extern agi_system_state_t system_state;
+	system_state.input_pos = 0;
+	system_state.input_buffer[0] = '\0';
+
 	stop_update(0);
 	for (uint8_t objNo = 0; objNo < MAX_NUM_OBJECTS; objNo++)
 	{
@@ -89,9 +95,11 @@ void new_room(uint8_t room_no)
 	case BORDER_BOTTOM:
 		EGO.y = state.horizon + 1;
 		break;
-	case BORDER_LEFT:
-		EGO.x = 160 - _object_cell(&EGO)->width;
+	case BORDER_LEFT: {
+		cell_t* ego_cell = _object_cell(&EGO);
+		if (ego_cell) EGO.x = 160 - ego_cell->width;
 		break;
+	}
 	case BORDER_RIGHT:
 		EGO.x = 0;
 		break;

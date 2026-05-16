@@ -90,6 +90,7 @@ static void update_object(uint8_t objNo) {
 		set_loop_from_dir(objNo, obj->direction);
 
 		cell_t* cell = _object_cell(obj);
+		if (!cell) return;
 
 		if (!obj->ignore_horizon && state.flags[FLAG_5_ROOM_EXECUTED_FIRST_TIME] && obj->y <= state.horizon)
 			obj->y = state.horizon + 1;
@@ -110,24 +111,32 @@ static void update_object(uint8_t objNo) {
 			if (obj->direction == DIR_UP || obj->direction == DIR_UP_LEFT || obj->direction == DIR_UP_RIGHT) {
 				newY -= stepSize;
 				obj->move_distance_y += stepSize;
-				if (obj->move_distance_y > 0)
+				if (obj->move_distance_y > 0) {
+					if (obj->move_mode == OBJ_MOVEMODE_MOVE_TO) newY += obj->move_distance_y;
 					obj->move_distance_y = 0;
+				}
 			} else if (obj->direction == DIR_DOWN || obj->direction == DIR_DOWN_LEFT || obj->direction == DIR_DOWN_RIGHT) {
 				newY += stepSize;
 				obj->move_distance_y -= stepSize;
-				if (obj->move_distance_y < 0)
+				if (obj->move_distance_y < 0) {
+					if (obj->move_mode == OBJ_MOVEMODE_MOVE_TO) newY += obj->move_distance_y;
 					obj->move_distance_y = 0;
+				}
 			}
 			if (obj->direction == DIR_LEFT || obj->direction == DIR_DOWN_LEFT || obj->direction == DIR_UP_LEFT) {
 				newX -= stepSize;
 				obj->move_distance_x += stepSize;
-				if (obj->move_distance_x > 0)
+				if (obj->move_distance_x > 0) {
+					if (obj->move_mode == OBJ_MOVEMODE_MOVE_TO) newX += obj->move_distance_x;
 					obj->move_distance_x = 0;
+				}
 			} else if (obj->direction == DIR_RIGHT || obj->direction == DIR_DOWN_RIGHT || obj->direction == DIR_UP_RIGHT) {
 				newX += stepSize;
 				obj->move_distance_x -= stepSize;
-				if (obj->move_distance_x < 0)
+				if (obj->move_distance_x < 0) {
+					if (obj->move_mode == OBJ_MOVEMODE_MOVE_TO) newX += obj->move_distance_x;
 					obj->move_distance_x = 0;
+				}
 			}
 
 			bool check_entire_baseline = obj->y != newY;
@@ -147,9 +156,10 @@ static void update_object(uint8_t objNo) {
 				for (size_t i = 0; i < MAX_NUM_OBJECTS; i++) {
 					object_t other_object = state.objects[i];
 					if (i != objNo && other_object.active && other_object.drawn && !other_object.ignore_objects) {
-						if (newY == other_object.y
+						cell_t* other_cell = _object_cell(&other_object);
+						if (other_cell && newY == other_object.y
 							&& newX + cell->width > other_object.x
-							&& newX < other_object.x + _object_cell(&other_object)->width
+							&& newX < other_object.x + other_cell->width
 							) {
 							stop = true;
 						}
@@ -161,6 +171,7 @@ static void update_object(uint8_t objNo) {
 				obj->move_mode = OBJ_MOVEMODE_NORMAL;
 				obj->direction = DIR_STOPPED;
 				state.flags[obj->move_done_flag] = true;
+				if (objNo == 0) player_control();
 			}
 
 			if (newY > 167) {

@@ -1,3 +1,5 @@
+#include <stdio.h>
+
 #include "../state.h"
 #include "../actions.h"
 #include "../platform_support.h"
