@@ -106,27 +106,41 @@ void parse_word_groups() {
 	}
 
 	c = system_state.input_buffer;
-
-	char* word_start = c;
-	size_t word_len = 0;
 	int word_i = 0;
 
 	while (*c) {
-		if (*c == ' ' || *c == '.') {
-			// Find out word group to parsed word
+		char* word_start = c;
+		size_t word_len = 0;
+		while (c[word_len] && c[word_len] != ' ') word_len++;
+
+		// Try "word1 word2" as a multi-word phrase before falling back to single-word lookup.
+		// WORDS.TOK can store phrases with spaces (e.g. "bay door" → group 128).
+		bool matched = false;
+		if (c[word_len] == ' ') {
+			size_t next_word_len = 0;
+			char* next_word = c + word_len + 1;
+			while (next_word[next_word_len] && next_word[next_word_len] != ' ') next_word_len++;
+
+			uint8_t saved_count = system_state.num_parsed_word_groups;
+			size_t phrase_len = word_len + 1 + next_word_len;
+			if (_find_word_group_of_word(word_start, phrase_len) &&
+				system_state.num_parsed_word_groups > saved_count) {
+				c += phrase_len;
+				if (*c == ' ') c++;
+				word_i += 2;
+				matched = true;
+			} else {
+				system_state.num_parsed_word_groups = saved_count;
+			}
+		}
+
+		if (!matched) {
 			if (!_find_word_group_of_word(word_start, word_len)) {
 				state.variables[VAR_9_MISSING_WORD_NO] = word_i;
 			}
-			c++;
-			word_start = c;
-			word_len = 0;
+			c += word_len;
+			if (*c == ' ') c++;
 			word_i++;
-		} else {
-			word_len++;
-			c++;
 		}
-	}
-	if (!_find_word_group_of_word(word_start, word_len) && state.variables[VAR_9_MISSING_WORD_NO] == 0) {
-		state.variables[VAR_9_MISSING_WORD_NO] = word_i;
 	}
 }

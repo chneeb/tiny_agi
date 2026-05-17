@@ -73,6 +73,20 @@ F1 is hardcoded to `menu_input()` in `process_input_game()` (matches original Si
 F3 recalls the previous input line.  
 ESC dismisses the menu (`close_menu()`).
 
+### enter_pressed lifecycle
+`state.enter_pressed` is set by `check_key()` when the user presses Enter during normal gameplay. It must be cleared in two places:
+
+1. **After `execute_logic_cycle()`** (interpreter.c, inside the STATE_PLAYING block) — prevents the command-submission Enter from persisting into subsequent cycles, which would cause the interpreter to repeatedly clear the input buffer and make typing impossible.
+2. **After `close_menu()`** in the STATE_MENU handler — prevents the menu-selection Enter from leaking into `have_key()` inside a triggered logic (e.g. the Help/About screen), which would cause it to exit immediately.
+
+`wait_for_enter()` in platform.c must NOT set `enter_pressed = true`. It consumes the keypress directly via `kbd_read()` (bypassing the game loop keyboard handler); if it also set `enter_pressed`, the flag would be seen by the STATE_MENU handler on the next cycle and auto-fire the current menu item.
+
+### player_control() restores text input
+`player_control()` calls `accept_input()` so that text input is re-enabled whenever movement control returns to the player — whether from a script command or from `update_object()` completing a `move_obj()` animation. Without this, any room logic that calls `prevent_input()` before a walk (e.g. SQ1 vehicle bay Logic 8) leaves the player unable to type after the walk finishes, because `accept_input()` is never called by the game logic itself.
+
+### new_room() clears FLAG_3 (ego touched trigger)
+`new_room()` explicitly resets `FLAG_3_EGO_TOUCHED_TRIGGER`. Without this, the flag set by `update_all_active()` in the previous room's cycle carries over, causing trigger-zone death checks in the new room's logic to fire immediately on the first cycle (e.g. SQ1 vehicle bay room 8 death when entering from room 9).
+
 ### get_message() bounds guard
 `message_no` is 1-indexed; passing 0 causes a `uint16_t` underflow to 65535, producing a wild pointer. Guard: `if (message_no >= message_section[0]) return "";`
 

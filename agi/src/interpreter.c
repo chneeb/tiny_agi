@@ -613,6 +613,9 @@ bool agi_logic_run_cycle(uint32_t now_ms) {
 				menu_item_t* sel = *system_state.current_menu_item;
 				if (sel) state.controllers[sel->controller] = true;
 				close_menu();
+				// Consume the menu-selection Enter so have_key() in the triggered
+				// logic (e.g. Help screen wait loop) doesn't see it and exit immediately.
+				state.enter_pressed = false;
 			}
 		}
 
@@ -652,7 +655,6 @@ bool agi_logic_run_cycle(uint32_t now_ms) {
 			bool previous_sound_status = state.flags[FLAG_9_SOUND_ENABLED];
 
 			execute_logic_cycle();
-
 			state.enter_pressed = false;
 			EGO.direction = state.variables[VAR_6_EGO_DIRECTION];
 

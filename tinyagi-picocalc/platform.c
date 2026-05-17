@@ -178,7 +178,6 @@ void wait_for_enter(void) {
         if (key < 0) continue;
         // ENTER or ESC both dismiss the dialog.
         if (key == 0x0A || key == 0xB1 || key == 0x1B) {
-            state.enter_pressed = true;
             return;
         }
         push_kbd_event(key);

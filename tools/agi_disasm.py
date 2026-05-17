@@ -76,8 +76,13 @@ def load_resource(vol_path, offset):
 def decode_messages(msg_section):
     if not msg_section: return {}
     num = msg_section[0]
-    msgs = {}
     key = b"Avis Durgan"
+    data_area_start = 3 + 2 * num
+    # Decrypt entire data area with cumulative key position
+    decrypted = bytearray(msg_section)
+    for pos in range(data_area_start, len(msg_section)):
+        decrypted[pos] = msg_section[pos] ^ key[(pos - data_area_start) % len(key)]
+    msgs = {}
     for m in range(num):
         off_pos = 3 + 2*m
         if off_pos + 1 >= len(msg_section): break
@@ -86,11 +91,9 @@ def decode_messages(msg_section):
             msgs[m+1] = ""; continue
         text_start = off + 1
         buf = bytearray()
-        i = 0
-        while text_start + i < len(msg_section):
-            c = msg_section[text_start + i] ^ key[i % len(key)]
-            if c == 0: break
-            buf.append(c); i += 1
+        i = text_start
+        while i < len(decrypted) and decrypted[i] != 0:
+            buf.append(decrypted[i]); i += 1
         msgs[m+1] = buf.decode('latin-1', errors='replace')
     return msgs
 

@@ -60,13 +60,16 @@ void new_room(uint8_t room_no)
 	system_state.input_pos = 0;
 	system_state.input_buffer[0] = '\0';
 
-	stop_update(0);
 	for (uint8_t objNo = 0; objNo < MAX_NUM_OBJECTS; objNo++)
 	{
 		object_t* obj = &state.objects[objNo];
 
-		obj->active = false;
-		obj->drawn = false;
+		// Ego (object 0) keeps its drawn/active state across room transitions.
+		// Room logics that don't call draw(0)/animate_obj(0) rely on this.
+		if (objNo != 0) {
+			obj->active = false;
+			obj->drawn = false;
+		}
 		obj->update = true;
 		obj->old_view_no = -1;
 		obj->step_size = obj->step_time = obj->steps_to_next_update = obj->cycle_time = obj->cycles_to_next_update = 1;
@@ -106,6 +109,7 @@ void new_room(uint8_t room_no)
 	}
 
 	state.variables[VAR_2_EGO_BORDER_CODE] = BORDER_NOTHING;
+	state.flags[FLAG_3_EGO_TOUCHED_TRIGGER] = false;
 	state.flags[FLAG_5_ROOM_EXECUTED_FIRST_TIME] = true;
 	state.variables[VAR_9_MISSING_WORD_NO] = 0;
 	state.flags[FLAG_2_COMMAND_ENTERED] = false;

@@ -55,7 +55,10 @@ bool controller(uint8_t ctr) {
 }
 
 bool have_key() {
-	return state.enter_pressed;
+	if (!state.enter_pressed) {
+		return false;
+	}
+	return true;
 }
 
 #define MIN(x, y) (x < y ? x : y)

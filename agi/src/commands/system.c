@@ -36,6 +36,7 @@ void pause() {
 
 void player_control() {
 	state.program_control = false;
+	accept_input();
 }
 
 void prevent_input() {
