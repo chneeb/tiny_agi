@@ -69,9 +69,11 @@ Outer `while(1)` calls `show_dir_chooser()` then `agi_initialize()` and runs the
 `agi_initialize()` calls `heap_full_reset()` before `state_reset()`. This frees **all** 256 logic/pic/view/sound slots (including logic 0 — `heap_destroy_resources()` skipped it), frees and NULLs `item_file` and `words_file` so they are reloaded from the new game directory on the next `new_room()`, and resets the script buffer. Without this, the second game ran the first game's logic 0 and used its item/vocabulary files.
 
 ### Input
-F1 is hardcoded to `menu_input()` in `process_input_game()` (matches original Sierra AGI behaviour; bypasses the controller system so game scripts can't redirect it).  
-F3 recalls the previous input line.  
-ESC dismisses the menu (`close_menu()`).
+- **ESC** (ascii 27) opens the menu via `menu_input()` in `process_input_game()`. Inside `process_input_menu()`, ESC also closes the menu.
+- **F1** falls through to the controller-assignment lookup so game scripts assign it to Help as intended. It is NOT hardcoded to `menu_input()`.
+- **F3** recalls the previous input line.
+
+Do not remap F1 back to `menu_input()`. The original Sierra AGI convention is ESC = menu, F1 = Help controller.
 
 ### enter_pressed lifecycle
 `state.enter_pressed` is set by `check_key()` when the user presses Enter during normal gameplay. It must be cleared in two places:
@@ -80,6 +82,13 @@ ESC dismisses the menu (`close_menu()`).
 2. **After `close_menu()`** in the STATE_MENU handler — prevents the menu-selection Enter from leaking into `have_key()` inside a triggered logic (e.g. the Help/About screen), which would cause it to exit immediately.
 
 `wait_for_enter()` in platform.c must NOT set `enter_pressed = true`. It consumes the keypress directly via `kbd_read()` (bypassing the game loop keyboard handler); if it also set `enter_pressed`, the flag would be seen by the STATE_MENU handler on the next cycle and auto-fire the current menu item.
+
+### have_key() — flush and keyboard polling
+Some AGI logics implement wait-for-keypress as a tight `goto` loop in bytecode that calls `have_key()` repeatedly without ever returning to the main game loop. This means `check_key()` in `main.c` never runs, so `enter_pressed` is never set and the interpreter deadlocks. `have_key()` in `test.c` therefore:
+- Calls `platform_flush_display()` on the first poll (so the help screen is visible before the user presses a key).
+- Calls `check_key()` on every poll while waiting (so keyboard input is processed inside the tight loop).
+
+`check_key()` is declared in `platform_support.h` with a note that it is designed for exactly this use.
 
 ### player_control() restores text input
 `player_control()` calls `accept_input()` so that text input is re-enabled whenever movement control returns to the player — whether from a script command or from `update_object()` completing a `move_obj()` animation. Without this, any room logic that calls `prevent_input()` before a walk (e.g. SQ1 vehicle bay Logic 8) leaves the player unable to type after the walk finishes, because `accept_input()` is never called by the game logic itself.

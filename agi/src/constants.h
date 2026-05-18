@@ -92,6 +92,7 @@
 
 
 
+#define AGI_KEY_ESC 27
 #define AGI_KEY_INS 82
 #define AGI_KEY_DEL 83
 #define AGI_KEY_F1 59

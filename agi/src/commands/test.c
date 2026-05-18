@@ -4,6 +4,7 @@
 #include "../state.h"
 #include "../heap.h"
 #include "../view.h"
+#include "../platform_support.h"
 
 bool equaln(uint8_t var, uint8_t num) {
 	return state.variables[var] == num;
@@ -55,9 +56,16 @@ bool controller(uint8_t ctr) {
 }
 
 bool have_key() {
+	static bool flushed = false;
 	if (!state.enter_pressed) {
+		if (!flushed) {
+			platform_flush_display();
+			flushed = true;
+		}
+		check_key();
 		return false;
 	}
+	flushed = false;
 	return true;
 }
 

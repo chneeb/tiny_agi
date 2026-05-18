@@ -456,7 +456,7 @@ void process_input_game(input_queue_entry_t entry) {
 	else if (entry.scancode == AGI_KEY_LEFT) {
 		state.variables[VAR_6_EGO_DIRECTION] = state.variables[VAR_6_EGO_DIRECTION] == DIR_LEFT ? DIR_STOPPED : DIR_LEFT;
 	}
-	else if (entry.scancode == AGI_KEY_F1) {
+	else if (entry.ascii == AGI_KEY_ESC) {
 		menu_input();
 	}
 	else if (entry.scancode == AGI_KEY_F3) {
@@ -506,7 +506,7 @@ void close_menu() {
 }
 
 void process_input_menu(input_queue_entry_t entry) {
-	if (entry.ascii == 27) {
+	if (entry.ascii == AGI_KEY_ESC) {
 		close_menu();
 		return;
 	}
