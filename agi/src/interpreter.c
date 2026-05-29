@@ -665,6 +665,14 @@ bool agi_logic_run_cycle(uint32_t now_ms) {
 			state.variables[VAR_4_OBJ_BORDER_OBJNO] = 0;
 			state.variables[VAR_5_OBJ_BORDER_CODE] = 0;
 
+			// new_room() places ego using the default horizon (36) because the new room's
+			// logic hasn't run yet. After the first cycle the room has set its real horizon
+			// via set_horizon(); if ego is now above it, clamp down so update_all_active
+			// doesn't immediately trigger BORDER_TOP and bounce us back to the previous room.
+			if (state.flags[FLAG_5_ROOM_EXECUTED_FIRST_TIME] && !EGO.ignore_horizon && EGO.y <= state.horizon) {
+				EGO.y = state.horizon + 1;
+			}
+
 			state.flags[FLAG_5_ROOM_EXECUTED_FIRST_TIME] = false;
 			state.flags[FLAG_6_RESTART_GAME_EXECUTED] = false;
 			state.flags[FLAG_12_GAME_RESTORED] = false;

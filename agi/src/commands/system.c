@@ -67,6 +67,7 @@ void restore_game() {
 
 	agi_save_data_file_ptr file = agi_save_data_open("rb");
 	agi_save_data_read(file, &state, sizeof(agi_state_t));
+	agi_text_mode = false;
 	
 
 	item_t* item = heap_data.item_file->items;

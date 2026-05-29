@@ -135,11 +135,13 @@ typedef struct {
 
 	bool status_line_on;
 
-	bool controllers[MAX_NUM_CONTROLLERS];	
-	
+	bool controllers[MAX_NUM_CONTROLLERS];
 
 	uint8_t game_state;
 } agi_state_t;
+
+// Transient UI state — not part of agi_state_t so it isn't serialised in saves.
+extern bool agi_text_mode;
 
 typedef struct {
 	char prev_input_buffer[40];

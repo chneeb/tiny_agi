@@ -54,9 +54,11 @@ void display_v(uint8_t vRow, uint8_t vCol, uint8_t vMsg)
 	display(state.variables[vRow], state.variables[vCol], state.variables[vMsg]);
 }
 
+bool agi_text_mode = false;
+
 void graphics()
 {
-	// TODO: Maybe OK, figure out if this is enough
+	agi_text_mode = false;
 	show_pic();
 }
 
@@ -144,7 +146,7 @@ void redraw_status_line() {
 		uint8_t col = 1;
 		sprintf(line, "Score:%d of %d\0", state.variables[VAR_3_SCORE], state.variables[VAR_7_MAX_SCORE]);
 		_draw_text(&state.status_line, &col, line, 0, 15);
-		
+
 		col = 29;
 		sprintf(line, "Sound:%s\0", state.flags[FLAG_9_SOUND_ENABLED] ? "on" : "off");
 		_draw_text(&state.status_line, &col, line, 0, 15);
@@ -153,5 +155,6 @@ void redraw_status_line() {
 
 void text_screen()
 {
+	agi_text_mode = true;
 	clear_lines(0, 25, 0);
 }

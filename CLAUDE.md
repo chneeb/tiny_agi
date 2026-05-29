@@ -105,6 +105,26 @@ Clears `system_state.input_buffer` / `input_pos` so text entered in one room (or
 ### move_obj() restores player control on completion
 `move_obj()` for ego (object 0) calls `program_control()` when the move starts. When the move completes, `player_control()` is called automatically (`object_view.c`, inside `update_object()`). This matches the AGI spec. Without this, Roger would be permanently frozen after any animated room-entry walk (e.g. SQ1 room 9).
 
+### Room transition: ego placement with 1-pixel buffer
+`new_room()` (control_flow.c) places ego at the opposite side of the new room based on `VAR_2_EGO_BORDER_CODE`. The horizontal placements must offset by 1 pixel from the border, otherwise the border check re-trips on the next cycle and ego ping-pongs between the two rooms:
+- `BORDER_LEFT` (came from left): `EGO.x = 159 - ego_cell->width` (NOT `160 - width`, which puts the sprite's right edge at the right border)
+- `BORDER_RIGHT` (came from right): `EGO.x = 1` (NOT `0`, which is the left border)
+
+The vertical placements already have natural buffers and don't need adjustment.
+
+### Room transition: clamp ego.y below new horizon (post-cycle)
+`new_room()` runs *before* the new room's logic sets its real horizon, so `EGO.y = state.horizon + 1` uses the default horizon (36). When the room then calls `set_horizon(85)` and only repositions ego's x (e.g. SQ1 room 19's entry handler for v1==16), ego is left above the new horizon (y=37 above horizon=85) and `update_all_active()` immediately triggers `BORDER_TOP`, bouncing ego back to the previous room.
+
+Fix is in interpreter.c, after `execute_logic_cycle()` and before `update_all_active()`: if `FLAG_5_ROOM_EXECUTED_FIRST_TIME` is still set (i.e. the room just loaded), ego doesn't ignore horizon, and `EGO.y <= state.horizon`, clamp `EGO.y = state.horizon + 1`. This catches all four border directions in a single check — the original Sierra interpreter effectively did this by placing ego after the room logic ran.
+
+### text_mode (agi_text_mode global)
+`text_screen()` sets `agi_text_mode = true` and `graphics()` sets it to `false` and calls `show_pic()`. `main.c` checks `agi_text_mode` and skips `agi_draw_all_active()` while it's true, so the per-cycle erase-then-redraw of active views (which restores picture pixels from `pic_vis`, including doors) doesn't bleed background graphics through text-mode screens (e.g. SQ1 library cartridge research screen).
+
+`agi_text_mode` is defined in display.c and declared in state.h as a free-standing global — **deliberately NOT a field of `agi_state_t`**. Adding it to the state struct changes `sizeof(agi_state_t)` and silently corrupts existing save files (the byte-aligned read in `restore_game()` shifts everything that follows). Keep transient UI state out of the serialised struct.
+
+### restore_game() resets agi_text_mode
+After `agi_save_data_read(file, &state, ...)`, `restore_game()` explicitly sets `agi_text_mode = false`. Saves can only be initiated from the input prompt (normal mode), so this is normally a no-op, but it's defensive against any future code path that could save while in text mode.
+
 ### AGI Logic disassembler
 `tools/agi_disasm.py` disassembles AGI Logic bytecode. Usage:
 
@@ -117,6 +137,9 @@ Decrypts messages with the "Avis Durgan" XOR key. Useful for understanding why a
 
 ### Memory leak (known, low priority)
 `free_menu()` in state.c frees `menu_header_t` nodes but does not walk the `menu_item_t` chains inside each header — those are leaked on every `state_system_reset()`. Not a crash risk for typical session lengths.
+
+### Sound on/off toggle is cosmetic (known)
+`FLAG_9_SOUND_ENABLED` is read only in `display.c` (status line text) and `interpreter.c` (redraw trigger). The audio path in `commands/sound.c` does **not** check it — `sound()` always calls `agi_play_sound()` and currently-playing sounds aren't stopped when the flag flips. Toggling Sound Off via the menu / F2 updates the status line but the game keeps playing sounds. To fix: gate `sound()` on the flag (and still set the completion flag so logic waiting for sound-done doesn't hang), and call `agi_stop_sound()` when the flag transitions true→false (the interpreter already tracks `previous_sound_status`).
 
 ## Implemented but stubbed AGI commands
 The following return without doing anything; they don't crash:

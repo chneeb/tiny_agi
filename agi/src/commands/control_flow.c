@@ -100,11 +100,11 @@ void new_room(uint8_t room_no)
 		break;
 	case BORDER_LEFT: {
 		cell_t* ego_cell = _object_cell(&EGO);
-		if (ego_cell) EGO.x = 160 - ego_cell->width;
+		if (ego_cell) EGO.x = 159 - ego_cell->width;
 		break;
 	}
 	case BORDER_RIGHT:
-		EGO.x = 0;
+		EGO.x = 1;
 		break;
 	}
 
