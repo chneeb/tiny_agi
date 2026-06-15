@@ -117,8 +117,21 @@ The vertical placements already have natural buffers and don't need adjustment.
 
 Fix is in interpreter.c, after `execute_logic_cycle()` and before `update_all_active()`: if `FLAG_5_ROOM_EXECUTED_FIRST_TIME` is still set (i.e. the room just loaded), ego doesn't ignore horizon, and `EGO.y <= state.horizon`, clamp `EGO.y = state.horizon + 1`. This catches all four border directions in a single check — the original Sierra interpreter effectively did this by placing ego after the room logic ran.
 
+### Rendering order: sprites drawn before logic (text on top)
+`agi_draw_all_active()` is called inside `agi_logic_run_cycle()` (interpreter.c), **before** `execute_logic_cycle()`, not after. This means:
+
+1. Sprites are drawn to the framebuffer at positions set by the previous cycle's `update_all_active()`.
+2. `execute_logic_cycle()` runs — any `display()` or `print_at()` text calls write on top of the sprites.
+3. `flush_display()` in `main.c` shows the composited result.
+
+This matches the original AGI interpreter, which had a separate text overlay layer that always rendered above the graphics/sprite layer. The one-frame position lag introduced by drawing before updating is imperceptible at 20 fps.
+
+Without this order, games that use `display()` for full-screen overlays without calling `text_screen()` (e.g. PQ1 newspaper, which uses `clear_text_rect()` + `display()` each cycle) would have the character sprite drawn on top of the text.
+
+`_print()` also calls `agi_draw_all_active()` before showing a modal dialog box — with the new order this is a harmless redundant draw (sprites already on screen).
+
 ### text_mode (agi_text_mode global)
-`text_screen()` sets `agi_text_mode = true` and `graphics()` sets it to `false` and calls `show_pic()`. `main.c` checks `agi_text_mode` and skips `agi_draw_all_active()` while it's true, so the per-cycle erase-then-redraw of active views (which restores picture pixels from `pic_vis`, including doors) doesn't bleed background graphics through text-mode screens (e.g. SQ1 library cartridge research screen).
+`text_screen()` sets `agi_text_mode = true` and `graphics()` sets it to `false` and calls `show_pic()`. When `agi_text_mode` is true, `agi_draw_all_active()` is skipped (guarded in interpreter.c), so the per-cycle erase-then-redraw of active views (which restores picture pixels from `pic_vis`, including doors) doesn't bleed background graphics through text-mode screens (e.g. SQ1 library cartridge research screen).
 
 `agi_text_mode` is defined in display.c and declared in state.h as a free-standing global — **deliberately NOT a field of `agi_state_t`**. Adding it to the state struct changes `sizeof(agi_state_t)` and silently corrupts existing save files (the byte-aligned read in `restore_game()` shifts everything that follows). Keep transient UI state out of the serialised struct.
 
@@ -135,11 +148,23 @@ python3 tools/agi_disasm.py <game_dir> <logic_no>
 
 Decrypts messages with the "Avis Durgan" XOR key. Useful for understanding why a room behaves unexpectedly.
 
-### Memory leak (known, low priority)
-`free_menu()` in state.c frees `menu_header_t` nodes but does not walk the `menu_item_t` chains inside each header — those are leaked on every `state_system_reset()`. Not a crash risk for typical session lengths.
+## Known issues / TODO
+
+### Display overlay buffer (not yet implemented)
+`display()` calls write text to the main framebuffer. On idle cycles (no keypress), the game logic may not redraw that text, but `agi_draw_all_active()` still runs and draws sprites over the retained text. This makes sprites visible over persistent display-based overlays such as the PQ1 newspaper (which uses `clear_text_rect()` + `display()` each cycle, but only when a key is pressed).
+
+Fix: add a 40×25 character-cell overlay buffer (`char_overlay[25][40]`, `fg_overlay[25][40]`, `bg_overlay[25][40]`) in `display.c`. When `display()` writes a character, also record it in the overlay. When `clear_text_rect()` or `clear_lines()` clears an area, also clear those overlay cells. After `agi_draw_all_active()` in interpreter.c, call `apply_display_overlay()` to composite the overlay back over the framebuffer. Clear the overlay on `graphics()` and `new_room()`. ~50–60 lines across display.c, interpreter.c, control_flow.c. Adds ~3 KB of state.
+
+Note: this is distinct from the `agi_text_mode` path — games that call `text_screen()` (e.g. SQ1 library) already suppress sprite drawing entirely and don't need the overlay.
 
 ### Sound on/off toggle is cosmetic (known)
 `FLAG_9_SOUND_ENABLED` is read only in `display.c` (status line text) and `interpreter.c` (redraw trigger). The audio path in `commands/sound.c` does **not** check it — `sound()` always calls `agi_play_sound()` and currently-playing sounds aren't stopped when the flag flips. Toggling Sound Off via the menu / F2 updates the status line but the game keeps playing sounds. To fix: gate `sound()` on the flag (and still set the completion flag so logic waiting for sound-done doesn't hang), and call `agi_stop_sound()` when the flag transitions true→false (the interpreter already tracks `previous_sound_status`).
+
+### restart_game() not implemented
+Stubbed — will panic if called. Not yet triggered by SQ1/SQ2/PQ1.
+
+### Memory leak (low priority)
+`free_menu()` in state.c frees `menu_header_t` nodes but does not walk the `menu_item_t` chains inside each header — those are leaked on every `state_system_reset()`. Not a crash risk for typical session lengths.
 
 ## Implemented but stubbed AGI commands
 The following return without doing anything; they don't crash:
@@ -151,5 +176,6 @@ The following return without doing anything; they don't crash:
 Implemented and working. No "Game saved" / "Game restored" dialog is shown — this is intentional.
 
 ## Tested games
-- **Space Quest 1** — plays through correctly; menu, F1, quit, save/restore all work.
+- **Space Quest 1** — plays through correctly; menu, F1, quit, save/restore all work. Library computer terminal (text_screen mode) works. Typing "exit" at the terminal falls through silently (correct — word group 157 is not handled by the library logic; type an unrecognised word or press ESC to close the terminal cleanly).
 - **Space Quest 2** — plays through correctly including intro sequence.
+- **Police Quest 1** — partially tested. Newspaper room (Logic 116) renders correctly with the rendering-order fix; character sprite appears as a dark silhouette on idle frames (see display overlay buffer TODO). Exit via "close paper", "put down paper", or "stop reading".

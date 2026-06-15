@@ -654,6 +654,14 @@ bool agi_logic_run_cycle(uint32_t now_ms) {
 			uint8_t previous_score = state.variables[VAR_3_SCORE];
 			bool previous_sound_status = state.flags[FLAG_9_SOUND_ENABLED];
 
+			// Draw sprites before running logic so that display() text rendered
+			// during the logic cycle lands on top of sprites — matching the original
+			// AGI interpreter's separate text overlay layer. Positions used here were
+			// set by the previous cycle's update_all_active(); the one-frame lag is
+			// imperceptible at 20 fps. Skipped in text_screen mode (agi_text_mode).
+			if (!agi_text_mode)
+				agi_draw_all_active();
+
 			execute_logic_cycle();
 			state.enter_pressed = false;
 			EGO.direction = state.variables[VAR_6_EGO_DIRECTION];

@@ -54,8 +54,6 @@ int main(void) {
 
             bool did_run = agi_logic_run_cycle(now_ms);
             if (did_run) {
-                if (state.game_state != STATE_MENU && !agi_text_mode)
-                    agi_draw_all_active();
                 flush_display();
                 update_sound();
 
