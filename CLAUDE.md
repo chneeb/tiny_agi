@@ -16,14 +16,23 @@ agi/                   Platform-independent AGI engine (C)
       menu_io.c        set_menu(), set_menu_item(), menu_input()
   include/agi.h        Public API (agi_initialize, print_message_box)
 
-tinyagi-picocalc/      RP2350 / PicoCalc port (the active target)
+tinyagi-picocalc/      RP2350 / PicoCalc port
   main.c               Outer game-select loop + inner game loop
   platform.c           Platform callbacks: keyboard, display flush, sound, file I/O
   display.c            320×200 framebuffer → ILI9488 TFT (320×320, y-offset 60)
   kbd_input.*          PicoCalc keyboard driver
   sdcard.*             FAT SD card (game files live in per-game subdirectories)
-  lcdspi.*             ILI9488 SPI driver
+  lcdspi.*             ILI9488 SPI driver (from ClockworkPi lcdspi library)
   audio/               PWM synth for AGI sound
+
+tinyagi-restouch/      RP2350 / PICO_RESTOUCH port (ST7789 320×240 + CardKB + SD)
+  main.c               Same structure as picocalc; no sound calls
+  platform.c           Platform callbacks: keyboard, display flush, sound stubs, file I/O
+  display.c            320×200 framebuffer → ST7789 TFT (320×240, y-offset 20); RGB565
+  kbd_input.*          M5Stack CardKB I2C driver (i2c1, GP2=SDA, GP3=SCL, addr 0x5F)
+  sdcard.*             FAT SD card; Enter key mapped to 0x0D (CardKB CR)
+  lcdspi.*             ST7789 SPI driver; MADCTL=0xA0; 80 MHz; shared bus with SD
+  hw_config.c          FatFs_SPI hw config: spi1, MISO=12, MOSI=11, SCK=10, CS=22
 
 tinyagi-glfw/          Desktop GLFW port (reference; not actively developed)
 
@@ -40,14 +49,34 @@ make -j$(nproc)
 # produces tinyagi_picocalc.uf2
 ```
 
+## Build (RESTOUCH target)
+
+```bash
+cd tinyagi-restouch
+mkdir -p build && cd build
+cmake .. -DPICO_SDK_PATH=/home/chneeb/Source/pico-sdk -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc)
+# produces tinyagi_restouch.uf2
+```
+
 Requires Pico SDK 2.2.0, `PICO_BOARD=pico2` (RP2350 / Pico 2).
 
 ## Hardware
 
+### PicoCalc
 - ClockworkPi PicoCalc — RP2350 (Cortex-M33), 520 KB SRAM, 4 MB flash
 - ILI9488 SPI TFT, 320×320. AGI 320×200 frame is centred (60-row black margins top/bottom).
 - SPI1 runs at 50 MHz after `display_init()`.
 - SD card holds game directories; each directory contains standard AGI VOL/DIR files.
+
+### RESTOUCH
+- RP2350 (Pico 2) at 300 MHz
+- ST7789 SPI TFT, 320×240. AGI 320×200 frame centred (20-row black margins top/bottom).
+- MADCTL=0xA0 (MY+MV for landscape). ENTER_INVERT_MODE needed for IPS panel colours.
+- SPI1 shared by LCD (DC=8, CS=9, CLK=10, MOSI=11, RST=15, BL=13) and SD (CS=22, MISO=12).
+- Touch CS (GP16) parked HIGH — touch not used.
+- M5Stack CardKB on i2c1 (SDA=GP2, SCL=GP3, I2C addr 0x5F).
+- No audio hardware; sound commands are stubbed.
 
 ## Key design decisions & fixes applied
 
@@ -149,6 +178,21 @@ python3 tools/agi_disasm.py <game_dir> <logic_no>
 Decrypts messages with the "Avis Durgan" XOR key. Useful for understanding why a room behaves unexpectedly.
 
 ## Known issues / TODO
+
+### RESTOUCH: dialog box corners render as wrong characters (open)
+In-game dialog boxes (print_message_box) show wrong glyphs at the four corner positions (┌┐└┘, codes 0xDA/0xBF/0xC0/0xD9). The user reports ┌ shows as "a letter or garbage". Root cause not yet identified:
+- Font data (platform.c) is byte-for-byte identical to the PicoCalc version (verified).
+- The rendering path (screen_set_320 → framebuffer → flush_display) is identical to PicoCalc.
+- The ST7789 display works correctly overall (text, graphics, game play all confirmed working).
+- Y-axis inversion would show corners as opposite-type (e.g. ┌→└), not arbitrary garbage — ruled out.
+- SPI data corruption suspected but not confirmed. Investigated: SPI format (CPOL/CPHA) is consistent; SPI clock is reduced to 12.5 MHz after each SD card access (see below).
+Needs further investigation on-device (e.g. printf the character code at the draw call, or visually identify which glyph is displayed).
+
+### RESTOUCH: SPI clock drops to 12.5 MHz after SD card access
+`lcdspi_init()` configures spi1 at 80 MHz. The FatFs_SPI library's `my_spi_init()` calls `spi_init(spi1, ...)` (one-time, guarded) then `spi_set_baudrate(spi1, 12.5 MHz)` on each SD access. After any SD read, spi1 is left at 12.5 MHz and all subsequent LCD operations (framebuffer flushes, startup text) run at that reduced rate. ST7789 is within spec at 12.5 MHz so rendering is correct but slower. Fix: call `spi_set_baudrate(LCD_SPI_PORT, LCD_SPI_CLOCK_HZ)` at the start of `lcdspi_set_address()`.
+
+### RESTOUCH: lcd_clear() does not reset the text cursor
+`lcd_clear()` in `lcdspi.c` clears the ST7789 framebuffer but does not reset the static `text_col`/`text_row` variables used by `lcd_print_string()`. After the game chooser redraws following a cursor-key press, the subsequent `lcd_print_string()` calls start from the row where they left off rather than row 0, pushing text progressively down the screen. Fix: add `text_col = 0; text_row = 0;` inside `lcd_clear()`.
 
 ### Display overlay buffer (not yet implemented)
 `display()` calls write text to the main framebuffer. On idle cycles (no keypress), the game logic may not redraw that text, but `agi_draw_all_active()` still runs and draws sprites over the retained text. This makes sprites visible over persistent display-based overlays such as the PQ1 newspaper (which uses `clear_text_rect()` + `display()` each cycle, but only when a key is pressed).
