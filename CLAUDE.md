@@ -179,15 +179,6 @@ Decrypts messages with the "Avis Durgan" XOR key. Useful for understanding why a
 
 ## Known issues / TODO
 
-### RESTOUCH: dialog box corners render as wrong characters (open)
-In-game dialog boxes (print_message_box) show wrong glyphs at the four corner positions (┌┐└┘, codes 0xDA/0xBF/0xC0/0xD9). The user reports ┌ shows as "a letter or garbage". Root cause not yet identified:
-- Font data (platform.c) is byte-for-byte identical to the PicoCalc version (verified).
-- The rendering path (screen_set_320 → framebuffer → flush_display) is identical to PicoCalc.
-- The ST7789 display works correctly overall (text, graphics, game play all confirmed working).
-- Y-axis inversion would show corners as opposite-type (e.g. ┌→└), not arbitrary garbage — ruled out.
-- SPI data corruption suspected but not confirmed. Investigated: SPI format (CPOL/CPHA) is consistent; SPI clock is reduced to 12.5 MHz after each SD card access (see below).
-Needs further investigation on-device (e.g. printf the character code at the draw call, or visually identify which glyph is displayed).
-
 ### RESTOUCH: SPI clock drops to 12.5 MHz after SD card access
 `lcdspi_init()` configures spi1 at 80 MHz. The FatFs_SPI library's `my_spi_init()` calls `spi_init(spi1, ...)` (one-time, guarded) then `spi_set_baudrate(spi1, 12.5 MHz)` on each SD access. After any SD read, spi1 is left at 12.5 MHz and all subsequent LCD operations (framebuffer flushes, startup text) run at that reduced rate. ST7789 is within spec at 12.5 MHz so rendering is correct but slower. Fix: call `spi_set_baudrate(LCD_SPI_PORT, LCD_SPI_CLOCK_HZ)` at the start of `lcdspi_set_address()`.
 
