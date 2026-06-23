@@ -182,9 +182,6 @@ Decrypts messages with the "Avis Durgan" XOR key. Useful for understanding why a
 ### RESTOUCH: SPI clock drops to 12.5 MHz after SD card access
 `lcdspi_init()` configures spi1 at 80 MHz. The FatFs_SPI library's `my_spi_init()` calls `spi_init(spi1, ...)` (one-time, guarded) then `spi_set_baudrate(spi1, 12.5 MHz)` on each SD access. After any SD read, spi1 is left at 12.5 MHz and all subsequent LCD operations (framebuffer flushes, startup text) run at that reduced rate. ST7789 is within spec at 12.5 MHz so rendering is correct but slower. Fix: call `spi_set_baudrate(LCD_SPI_PORT, LCD_SPI_CLOCK_HZ)` at the start of `lcdspi_set_address()`.
 
-### RESTOUCH: lcd_clear() does not reset the text cursor
-`lcd_clear()` in `lcdspi.c` clears the ST7789 framebuffer but does not reset the static `text_col`/`text_row` variables used by `lcd_print_string()`. After the game chooser redraws following a cursor-key press, the subsequent `lcd_print_string()` calls start from the row where they left off rather than row 0, pushing text progressively down the screen. Fix: add `text_col = 0; text_row = 0;` inside `lcd_clear()`.
-
 ### Display overlay buffer (not yet implemented)
 `display()` calls write text to the main framebuffer. On idle cycles (no keypress), the game logic may not redraw that text, but `agi_draw_all_active()` still runs and draws sprites over the retained text. This makes sprites visible over persistent display-based overlays such as the PQ1 newspaper (which uses `clear_text_rect()` + `display()` each cycle, but only when a key is pressed).
 

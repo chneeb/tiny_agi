@@ -72,6 +72,11 @@ void lcdspi_end_write(void)
     gpio_put(LCD_PIN_CS, 1);
 }
 
+// ── Startup text rendering ───────────────────────────────────────────────────
+
+static int text_col = 0;
+static int text_row = 0;
+
 void lcd_clear(void)
 {
     static const uint8_t black[2] = {0x00, 0x00};
@@ -79,12 +84,9 @@ void lcd_clear(void)
     for (int i = 0; i < 320 * 240; i++)
         spi_write_blocking(LCD_SPI_PORT, black, 2);
     lcdspi_end_write();
+    text_col = 0;
+    text_row = 0;
 }
-
-// ── Startup text rendering ───────────────────────────────────────────────────
-
-static int text_col = 0;
-static int text_row = 0;
 
 static void draw_char_direct(int col, int row, unsigned char c, uint16_t fg, uint16_t bg)
 {
