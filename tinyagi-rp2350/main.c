@@ -2,7 +2,13 @@
 #include <malloc.h>
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
+#if USE_VREG_BOOST
 #include "hardware/vreg.h"
+#endif
+#if SOUND_ENABLED
+#include "audio/pwm_synth.h"
+#include "agi_sound_player/agi_sound.h"
+#endif
 
 #include "display.h"
 #include "kbd_input.h"
@@ -13,10 +19,11 @@
 extern char game_dir[64];
 
 int main(void) {
-    // RP2350 at 300 MHz (same overclock as infones PICO_RESTOUCH target)
+#if USE_VREG_BOOST
     vreg_set_voltage(VREG_VOLTAGE_1_20);
     sleep_ms(10);
-    set_sys_clock_khz(300000, true);
+#endif
+    set_sys_clock_khz(SYS_CLOCK_KHZ, true);
     stdio_init_all();
 
     kbd_input_init();
@@ -28,6 +35,10 @@ int main(void) {
         lcd_print_string("SD mount FAILED!\n");
         while (1) tight_loop_contents();
     }
+
+#if SOUND_ENABLED
+    pwm_synth_init(26);
+#endif
 
     while (1) {
         if (!show_dir_chooser(game_dir, sizeof(game_dir))) {
@@ -50,7 +61,9 @@ int main(void) {
             bool did_run = agi_logic_run_cycle(now_ms);
             if (did_run) {
                 flush_display();
-
+#if SOUND_ENABLED
+                platform_tick_sound();
+#endif
                 if (++cycle_count % 200 == 0) {
                     struct mallinfo mi = mallinfo();
                     printf("heap free: %d  used: %d  cycles: %lu\n",

@@ -8,10 +8,12 @@
 #include "display.h"
 #include "kbd_input.h"
 #include "sdcard.h"
+#if SOUND_ENABLED
+#include "agi_sound_player/agi_sound.h"
+#endif
 
 // -----------------------------------------------------------------------
 // Game directory set by main() after the dir chooser runs.
-// platform.c uses it to build full file paths for every get_file() call.
 // -----------------------------------------------------------------------
 char game_dir[64];
 
@@ -21,7 +23,6 @@ char game_dir[64];
 agi_file_t get_file(const char *filename) {
     char path[96];
     snprintf(path, sizeof(path), "%s/%s", game_dir, filename);
-
     size_t sz = 0;
     uint8_t *data = sd_read_file(path, &sz);
     if (!data)
@@ -68,8 +69,8 @@ void agi_save_data_close(agi_save_data_file_ptr file_ptr) {
 
 // -----------------------------------------------------------------------
 // Keyboard → AGI input queue mapping.
-// CardKB codes → AGI scancodes / ASCII.
-// Codes match the PicoCalc conventions so the switch table is reused unchanged.
+// Key codes follow PicoCalc conventions; KB_ENTER_CODE and KB_F10_CODE
+// are set per-target in CMakeLists.txt.
 // -----------------------------------------------------------------------
 static void push_kbd_event(int key) {
     char ascii = 0;
@@ -92,10 +93,11 @@ static void push_kbd_event(int key) {
         case 0x87: scancode = AGI_KEY_F7;    break;
         case 0x88: scancode = AGI_KEY_F8;    break;
         case 0x89: scancode = AGI_KEY_F9;    break;
-        case 0x8A: scancode = AGI_KEY_F10;   break;
-        case 0x08: ascii = '\b';             break;  // BACKSPACE
-        case 0x09: ascii = '\t';             break;  // TAB
-        case 0x1B: ascii = 27;              break;  // ESC
+        case KB_F10_CODE: scancode = AGI_KEY_F10; break;
+        case 0x08: ascii = '\b';             break;
+        case 0x09: ascii = '\t';             break;
+        case 0x1B: ascii = 27;              break;  // ESC / Ctrl+[
+        case 0xB1: ascii = 27;              break;  // PicoCalc ESC key (harmless on RESTOUCH)
         default:
             if (key >= 0x20 && key < 0x7F)
                 ascii = (char)key;
@@ -113,7 +115,7 @@ void platform_debug_flush(void) {
 void check_key(void) {
     int key = kbd_read();
     if (key < 0) return;
-    if (key == 0x0D) {                   // ENTER — CardKB sends CR
+    if (key == KB_ENTER_CODE) {
         state.enter_pressed = true;
     } else {
         push_kbd_event(key);
@@ -121,24 +123,61 @@ void check_key(void) {
 }
 
 // -----------------------------------------------------------------------
-// Sound — disabled; stubs satisfy the AGI engine link requirements.
+// Sound
 // -----------------------------------------------------------------------
 void platform_tick_sound(void) {
-    // No audio hardware on this target.
+#if SOUND_ENABLED
+    static uint32_t last_ms = 0;
+    static uint32_t accum_ms = 0;
+    static bool first_call = true;
+
+    uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    if (first_call) {
+        last_ms = now_ms;
+        first_call = false;
+        return;
+    }
+    uint32_t delta = now_ms - last_ms;
+    last_ms = now_ms;
+
+    // Cap delta to avoid fast-forwarding sound after a long blocking call.
+    if (delta > 150) delta = 150;
+
+    accum_ms += delta;
+
+    // 1 AGI sound tick = 1/60 s ≈ 16.67 ms
+    int ticks = (int)(accum_ms * 60 / 1000);
+    if (ticks <= 0) return;
+    accum_ms -= (uint32_t)(ticks * 1000 / 60);
+
+    if (state.sound_flag > -1 && agi_sound_is_playing()) {
+        if (!agi_sound_tick(ticks)) {
+            state.flags[state.sound_flag] = true;
+            state.sound_flag = -1;
+            agi_stop_sound();
+        }
+    }
+#endif
 }
 
 void platform_flush_display(void) {
     flush_display();
+#if SOUND_ENABLED
+    platform_tick_sound();
+#endif
 }
 
 void wait_for_enter(void) {
     flush_display();
     while (1) {
+#if SOUND_ENABLED
+        platform_tick_sound();
+#endif
         int key = kbd_read();
         if (key < 0) continue;
-        if (key == 0x0D || key == 0x1B) {
+        // KB_ENTER_CODE, PicoCalc ESC (0xB1), and standard ESC (0x1B) all dismiss.
+        if (key == KB_ENTER_CODE || key == 0xB1 || key == 0x1B)
             return;
-        }
         push_kbd_event(key);
     }
 }
@@ -149,18 +188,22 @@ bool wait_for_key_yn(void) {
         int key = kbd_read();
         if (key < 0) continue;
         if (key == 'y' || key == 'Y') return true;
-        if (key == 'n' || key == 'N' || key == 0x1B) return false;
+        if (key == 'n' || key == 'N' || key == 0xB1 || key == 0x1B) return false;
     }
 }
 
-// -----------------------------------------------------------------------
-// Sound stubs
-// -----------------------------------------------------------------------
 void agi_play_sound(uint8_t *sound_data) {
+#if SOUND_ENABLED
+    agi_sound_start(sound_data);
+#else
     (void)sound_data;
+#endif
 }
 
 void agi_stop_sound(void) {
+#if SOUND_ENABLED
+    agi_sound_stop();
+#endif
 }
 
 // -----------------------------------------------------------------------

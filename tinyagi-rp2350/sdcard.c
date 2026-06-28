@@ -8,6 +8,7 @@
 #include <string.h>
 #include <stdlib.h>
 
+// Required by FatFS when compiled without hardware RTC.
 DWORD get_fattime(void) { return 0; }
 
 static FATFS fs;
@@ -70,14 +71,14 @@ bool show_dir_chooser(char *out_path, size_t len)
         int key = kbd_read();
         if (key < 0) continue;
 
-        if (key == 0xB5) {           // UP
+        if (key == 0xB5) {                          // UP
             if (sel > 0) { sel--; redraw = true; }
-        } else if (key == 0xB6) {    // DOWN
+        } else if (key == 0xB6) {                   // DOWN
             if (sel < count - 1) { sel++; redraw = true; }
-        } else if (key == 0x0D) {    // ENTER (CardKB sends 0x0D)
+        } else if (key == KB_ENTER_CODE) {           // ENTER
             snprintf(out_path, len, "0:/agi/%s", names[sel]);
             return true;
-        } else if (key == 0x1B) {    // ESC
+        } else if (key == 0x1B || key == 0xB1) {    // ESC
             return false;
         }
     }

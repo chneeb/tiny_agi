@@ -16,23 +16,23 @@ agi/                   Platform-independent AGI engine (C)
       menu_io.c        set_menu(), set_menu_item(), menu_input()
   include/agi.h        Public API (agi_initialize, print_message_box)
 
-tinyagi-picocalc/      RP2350 / PicoCalc port
-  main.c               Outer game-select loop + inner game loop
-  platform.c           Platform callbacks: keyboard, display flush, sound, file I/O
-  display.c            320×200 framebuffer → ILI9488 TFT (320×320, y-offset 60)
-  kbd_input.*          PicoCalc keyboard driver
-  sdcard.*             FAT SD card (game files live in per-game subdirectories)
-  lcdspi.*             ILI9488 SPI driver (from ClockworkPi lcdspi library)
-  audio/               PWM synth for AGI sound
-
-tinyagi-restouch/      RP2350 / PICO_RESTOUCH port (ST7789 320×240 + CardKB + SD)
-  main.c               Same structure as picocalc; no sound calls
-  platform.c           Platform callbacks: keyboard, display flush, sound stubs, file I/O
-  display.c            320×200 framebuffer → ST7789 TFT (320×240, y-offset 20); RGB565
-  kbd_input.*          M5Stack CardKB I2C driver (i2c1, GP2=SDA, GP3=SCL, addr 0x5F)
-  sdcard.*             FAT SD card; Enter key mapped to 0x0D (CardKB CR)
-  lcdspi.*             ST7789 SPI driver; MADCTL=0xA0; 80 MHz; shared bus with SD
-  hw_config.c          FatFs_SPI hw config: spi1, MISO=12, MOSI=11, SCK=10, CS=22
+tinyagi-rp2350/        Merged RP2350 port — PicoCalc and RESTOUCH as two CMake targets
+  main.c               Shared game loop; #if SOUND_ENABLED / USE_VREG_BOOST guards
+  platform.c           Shared platform callbacks; #if SOUND_ENABLED for audio path
+  sdcard.c             Shared SD/FAT file I/O; KB_ENTER_CODE define per target
+  display.h            Shared display interface (display_init, flush_display, etc.)
+  audio/               PWM synth for AGI sound (linked by both; gated by SOUND_ENABLED)
+  agi_sound_player/    AGI sound decoder (linked by both; gated by SOUND_ENABLED)
+  fatfs/               FatFs_SPI submodule (shared)
+  picocalc/            PicoCalc-specific hardware
+    display.c          320×200 framebuffer → ILI9488 TFT (320×320, y-offset 60); RGB888
+    kbd_input.*        PicoCalc keyboard driver (ClockworkPi i2ckbd library)
+    hw_config.c        FatFs_SPI hw config for PicoCalc SD card
+  restouch/            RESTOUCH-specific hardware
+    display.c          320×200 framebuffer → ST7789 TFT (320×240, y-offset 20); RGB565
+    lcdspi.*           ST7789 SPI driver; MADCTL=0xA0; 80 MHz; shared bus with SD
+    kbd_input.*        M5Stack CardKB I2C driver (i2c1, GP2=SDA, GP3=SCL, addr 0x5F)
+    hw_config.c        FatFs_SPI hw config: spi1, MISO=12, MOSI=11, SCK=10, CS=22
 
 tinyagi-glfw/          Desktop GLFW port (reference; not actively developed)
 
@@ -40,43 +40,49 @@ tools/
   agi_disasm.py        AGI Logic bytecode disassembler (Python 3, no dependencies)
 ```
 
-## Build (PicoCalc target)
+## Build
+
+Both targets are defined in a single CMakeLists.txt. Build from `tinyagi-rp2350/`:
 
 ```bash
-cd tinyagi-picocalc/build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)
-# produces tinyagi_picocalc.uf2
-```
-
-## Build (RESTOUCH target)
-
-```bash
-cd tinyagi-restouch
+cd tinyagi-rp2350
 mkdir -p build && cd build
 cmake .. -DPICO_SDK_PATH=/home/chneeb/Source/pico-sdk -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
-# produces tinyagi_restouch.uf2
+# produces tinyagi_picocalc.uf2 and tinyagi_restouch.uf2
 ```
+
+To build only one target: `make -j$(nproc) tinyagi_picocalc` or `make -j$(nproc) tinyagi_restouch`.
 
 Requires Pico SDK 2.2.0, `PICO_BOARD=pico2` (RP2350 / Pico 2).
 
+### Per-target compile definitions
+
+| Define | PicoCalc | RESTOUCH |
+|---|---|---|
+| `SOUND_ENABLED` | 1 | 0 |
+| `KB_ENTER_CODE` | 0x0A | 0x0D |
+| `KB_F10_CODE` | 0x90 | 0x8A |
+| `SYS_CLOCK_KHZ` | 133000 | 300000 |
+| `USE_VREG_BOOST` | 0 | 1 |
+
 ## Hardware
 
-### PicoCalc
+### PicoCalc (`tinyagi_picocalc`)
 - ClockworkPi PicoCalc — RP2350 (Cortex-M33), 520 KB SRAM, 4 MB flash
-- ILI9488 SPI TFT, 320×320. AGI 320×200 frame is centred (60-row black margins top/bottom).
+- ILI9488 SPI TFT, 320×320. AGI 320×200 frame centred (60-row black margins top/bottom).
 - SPI1 runs at 50 MHz after `display_init()`.
 - SD card holds game directories; each directory contains standard AGI VOL/DIR files.
+- PWM audio on GP26.
 
-### RESTOUCH
-- RP2350 (Pico 2) at 300 MHz
+### RESTOUCH (`tinyagi_restouch`)
+- RP2350 (Pico 2) at 300 MHz (vreg boosted to 1.20 V).
 - ST7789 SPI TFT, 320×240. AGI 320×200 frame centred (20-row black margins top/bottom).
 - MADCTL=0xA0 (MY+MV for landscape). ENTER_INVERT_MODE needed for IPS panel colours.
 - SPI1 shared by LCD (DC=8, CS=9, CLK=10, MOSI=11, RST=15, BL=13) and SD (CS=22, MISO=12).
 - Touch CS (GP16) parked HIGH — touch not used.
 - M5Stack CardKB on i2c1 (SDA=GP2, SCL=GP3, I2C addr 0x5F).
-- No audio hardware; sound commands are stubbed.
+- No audio hardware; SOUND_ENABLED=0 stubs out the audio path at compile time.
 
 ## Key design decisions & fixes applied
 
