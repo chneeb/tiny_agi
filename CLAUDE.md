@@ -33,6 +33,11 @@ tinyagi-rp2350/        Merged RP2350 port — PicoCalc and RESTOUCH as two CMake
     lcdspi.*           ST7789 SPI driver; MADCTL=0xA0; 80 MHz; shared bus with SD
     kbd_input.*        M5Stack CardKB I2C driver (i2c1, GP2=SDA, GP3=SCL, addr 0x5F)
     hw_config.c        FatFs_SPI hw config: spi1, MISO=12, MOSI=11, SCK=10, CS=22
+  dvi/                 (not yet implemented) DVI/HDMI target via RP2350 HSTX peripheral
+    dviout.*           HSTX init, TMDS encoding, DMA scan-out
+    display.c          320×200 framebuffer → 640×480 DVI (2× pixel-doubled, 40-row borders)
+    kbd_input.*        USB HID keyboard via TinyUSB
+    hw_config.c        FatFs_SPI hw config for SD card
 
 tinyagi-glfw/          Desktop GLFW port (reference; not actively developed)
 
@@ -58,13 +63,13 @@ Requires Pico SDK 2.2.0, `PICO_BOARD=pico2` (RP2350 / Pico 2).
 
 ### Per-target compile definitions
 
-| Define | PicoCalc | RESTOUCH |
-|---|---|---|
-| `SOUND_ENABLED` | 1 | 0 |
-| `KB_ENTER_CODE` | 0x0A | 0x0D |
-| `KB_F10_CODE` | 0x90 | 0x8A |
-| `SYS_CLOCK_KHZ` | 133000 | 300000 |
-| `USE_VREG_BOOST` | 0 | 1 |
+| Define | PicoCalc | RESTOUCH | DVI (planned) |
+|---|---|---|---|
+| `SOUND_ENABLED` | 1 | 0 | 1 |
+| `KB_ENTER_CODE` | 0x0A | 0x0D | 0x0D |
+| `KB_F10_CODE` | 0x90 | 0x8A | HID scancode |
+| `SYS_CLOCK_KHZ` | 133000 | 300000 | 300000 |
+| `USE_VREG_BOOST` | 0 | 1 | 1 |
 
 ## Hardware
 
@@ -83,6 +88,15 @@ Requires Pico SDK 2.2.0, `PICO_BOARD=pico2` (RP2350 / Pico 2).
 - Touch CS (GP16) parked HIGH — touch not used.
 - M5Stack CardKB on i2c1 (SDA=GP2, SCL=GP3, I2C addr 0x5F).
 - No audio hardware; SOUND_ENABLED=0 stubs out the audio path at compile time.
+
+### DVI (`tinyagi_dvi` — not yet implemented)
+- RP2350 (Pico 2) at 300 MHz with vreg boost.
+- DVI/HDMI output via RP2350 **HSTX** peripheral (GPIO 12–19, 4 TMDS differential pairs). Do NOT use PicoDVI (PIO-based, RP2040-only). HSTX handles serialisation in hardware without dedicating a full core.
+- Output resolution: 640×480. AGI 320×200 frame pixel-doubled to 640×400, centred with 40-row black borders top and bottom. On-the-fly 2× scaling during scan-out — source framebuffer stays 320×200 (64 KB), no full 640×480 buffer needed.
+- USB HID keyboard via TinyUSB (bundled with Pico SDK). `kbd_read()` maps HID keycodes to AGI conventions.
+- SD card for game storage (same FatFs_SPI approach as other targets).
+- PWM audio on a free GPIO (SOUND_ENABLED=1).
+- HSTX DVI driver: base on pico-examples `hstx/dvi_out_hstx_encoder`. Main effort is TMDS encoding and DMA scan-out loop; integration into display.c is straightforward once the driver exists.
 
 ## Key design decisions & fixes applied
 
