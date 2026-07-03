@@ -29,6 +29,7 @@
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
 #include "hardware/dma.h"
+#include "hardware/structs/bus_ctrl.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -227,12 +228,59 @@ extern "C" uint8_t font_data[2048];  /* defined in platform.c; 256 glyphs x 8 ro
 /* display.h declares these as extern "C" via its __cplusplus guards. */
 
 void display_init(void) {
+    /* Give DMA priority over the cores on the bus arbiter.  pico_lib doesn't do
+     * this; without it the DVI scan-out DMA can be starved by core-side SRAM
+     * traffic (e.g. the HDMI-audio producer) → TMDS underrun → the monitor
+     * loses sync (black, ~10 s to re-lock).  pico-infonesPlus sets the same. */
+    bus_ctrl_hw->priority = BUSCTRL_BUS_PRIORITY_DMA_W_BITS |
+                            BUSCTRL_BUS_PRIORITY_DMA_R_BITS;
+
     memset(framebuffer,     0, sizeof(framebuffer));
     memset(priority_buffer, 0, sizeof(priority_buffer));
     dvi_inst = new dvi::DVI(pio0, &dvi_cfg, dvi::getTiming640x480p60Hz());
     multicore_launch_core1_with_stack(core1_dvi_loop, core1_stack,
                                       sizeof(core1_stack));
 }
+
+#if DVI_HDMI_AUDIO
+/* HDMI audio: AGI sound is carried as data-island audio in the DVI stream, so
+ * it plays through the monitor's speakers (needs an HDMI sink that decodes
+ * audio — a pure DVI display stays silent).  core0 pushes mono int16 samples
+ * (duplicated to stereo) into pico_lib's SPSC ring; core1's per-line
+ * updateDataPacket() drains it.  44100 Hz, N=6144, CTS auto from pixel clock. */
+/* DVI_AUDIO_DATAISLANDS=0 isolation build: set up the ring + producer but do NOT
+ * call setAudioFreq(), so data islands stay disabled and core1 does zero extra
+ * per-scanline work (and there is no sound).  If the black screen goes away with
+ * this, the culprit is the data-island load on core1; if it persists, it's the
+ * core0 producer/sound path or power. */
+#ifndef DVI_AUDIO_DATAISLANDS
+#define DVI_AUDIO_DATAISLANDS 1
+#endif
+
+extern "C" void dvi_audio_init(void) {
+#if DVI_AUDIO_DATAISLANDS
+    dvi_inst->setAudioFreq(44100, 0, 6144);   /* also enables data islands */
+#endif
+    dvi_inst->allocateAudioBuffer(1024);       /* power-of-two ring, ~4 KB */
+    dvi_inst->getAudioRingBuffer().advanceWritePointer(255);  /* prime silence */
+}
+
+extern "C" uint32_t dvi_audio_writable(void) {
+    return dvi_inst ? dvi_inst->getAudioRingBuffer().getWritableSize() : 0;
+}
+
+/* Write up to n mono samples (duplicated L/R).  getWritableSize() is a
+ * contiguous run, so a straight copy is safe without wrap handling. */
+extern "C" void dvi_audio_write(const int16_t *mono, int n) {
+    if (!dvi_inst || n <= 0) return;
+    auto &ring = dvi_inst->getAudioRingBuffer();
+    uint32_t avail = ring.getWritableSize();
+    if ((uint32_t)n > avail) n = (int)avail;
+    dvi::DVI::AudioSample *dst = ring.getWritePointer();
+    for (int i = 0; i < n; i++) { dst[i][0] = mono[i]; dst[i][1] = mono[i]; }
+    ring.advanceWritePointer((uint32_t)n);
+}
+#endif /* DVI_HDMI_AUDIO */
 
 void flush_display(void) {
     /* DVI scanout is continuous from core1 — framebuffer changes are

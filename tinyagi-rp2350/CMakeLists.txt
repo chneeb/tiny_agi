@@ -177,8 +177,8 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/pico_lib/dvi/CMakeLists.txt)
         DVI_TARGET=1                   # enables DVI-only debug hooks in shared main.c
         DVI_ENABLE_CDC=0               # 1 = USB-C serial console; 0 = UART-only (crash isolation test)
         DVI_KEEPALIVE_TIMER=1          # workaround for lost-wakeup room-transition hang (confirmed)
-        DVI_SEVONPEND=0                # (tried as root-cause fix; insufficient alone — left for reference)
-        SOUND_ENABLED=0                # GPIO 23 is SMPS mode pin on RP2350-PiZero — audio disabled
+        SOUND_ENABLED=0                # audio off by default (HDMI audio glitches audio-decoding monitors)
+        DVI_HDMI_AUDIO=0               # 1 = HDMI data-island audio (impl works; see CLAUDE.md open issue)
         KB_ENTER_CODE=0x0D
         KB_F10_CODE=0x8A
         SYS_CLOCK_KHZ=252000          # 21 x 12 MHz — PIO-USB constraint

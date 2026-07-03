@@ -35,19 +35,31 @@ extern char game_dir[64];
 #define DVI_KEEPALIVE_MS 250
 #endif
 
-/* DVI_SEVONPEND=1: set SCB->SCR.SEVONPEND on core0 so that ANY interrupt
- * entering the pending state generates an event that wakes core0 from __wfe.
- * This closes the lost-wakeup window in the SD DMA-completion wait
- * (sem_acquire_timeout_ms) that otherwise, under DVI-DMA contention, lets a
- * missed wakeup ride out to the 1 s timeout → failed SD read → transition hang.
- * A principled root-cause alternative to the keep-alive timer. */
-#ifndef DVI_SEVONPEND
-#define DVI_SEVONPEND 1
-#endif
-
 #if DVI_KEEPALIVE_TIMER
 static bool keepalive_cb(struct repeating_timer *t) {
     (void)t;              /* pure no-op: the wakeup IS the effect */
+    return true;
+}
+#endif
+
+#if DVI_HDMI_AUDIO
+/* HDMI-audio producer (see dvi/display.cpp).  A ~2 ms timer keeps pico_lib's
+ * ring topped up from the current 3-channel synth state, independent of the
+ * main loop — so audio doesn't drop out during blocking room loads.  It
+ * self-clocks: it only writes what core1 has drained (getWritableSize). */
+uint32_t dvi_audio_writable(void);
+void     dvi_audio_write(const int16_t *mono, int n);
+void     dvi_audio_init(void);
+
+static bool audio_producer_cb(struct repeating_timer *t) {
+    (void)t;
+    int16_t buf[128];
+    uint32_t w = dvi_audio_writable();
+    int n = w > 128 ? 128 : (int)w;
+    if (n > 0) {
+        pwm_synth_render(buf, n, 44100.0f);
+        dvi_audio_write(buf, n);
+    }
     return true;
 }
 #endif
@@ -82,11 +94,6 @@ int main(void) {
     set_sys_clock_khz(SYS_CLOCK_KHZ, true);
     stdio_init_all();
 
-#if DVI_TARGET && DVI_SEVONPEND
-    /* Wake core0 from __wfe on any pending interrupt (see DVI_SEVONPEND note). */
-    *(volatile uint32_t *)0xE000ED10 |= (1u << 4);  /* SCB->SCR, SEVONPEND */
-#endif
-
     kbd_input_init();
 #if DVI_TARGET
     cdc_stdio_init(); /* USB-C → serial terminal for printf debug output */
@@ -101,7 +108,13 @@ int main(void) {
     }
 
 #if SOUND_ENABLED
+#if DVI_HDMI_AUDIO
+    dvi_audio_init();   /* after display_init: dvi_inst exists */
+    static struct repeating_timer audio_timer;
+    add_repeating_timer_ms(2, audio_producer_cb, NULL, &audio_timer);
+#else
     pwm_synth_init(AUDIO_PIN);
+#endif
 #endif
 
 #if DVI_TARGET && DVI_KEEPALIVE_TIMER
