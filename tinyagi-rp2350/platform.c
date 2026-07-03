@@ -26,7 +26,7 @@ agi_file_t get_file(const char *filename) {
     size_t sz = 0;
     uint8_t *data = sd_read_file(path, &sz);
     if (!data)
-        printf("get_file NOT FOUND: %s\n", path);
+        printf("SD FAIL: %s\n", path);
     agi_file_t f = { .data = data, .size = sz };
     return f;
 }
@@ -196,7 +196,17 @@ void agi_play_sound(uint8_t *sound_data) {
 #if SOUND_ENABLED
     agi_sound_start(sound_data);
 #else
+    /* No audio hardware on this target.  Signal sound completion immediately
+     * so game logic that waits for the sound-done flag doesn't hang.  Such a
+     * wait is often a tight bytecode goto-loop that never returns to the main
+     * game loop, so it must be satisfied synchronously here (a deferred
+     * platform_tick_sound() would never get a chance to run).  This also frees
+     * the single sound channel (sound_flag) for the next sound() call. */
     (void)sound_data;
+    if (state.sound_flag > -1) {
+        state.flags[state.sound_flag] = true;
+        state.sound_flag = -1;
+    }
 #endif
 }
 

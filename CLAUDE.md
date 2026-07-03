@@ -33,11 +33,13 @@ tinyagi-rp2350/        Merged RP2350 port — PicoCalc and RESTOUCH as two CMake
     lcdspi.*           ST7789 SPI driver; MADCTL=0xA0; 80 MHz; shared bus with SD
     kbd_input.*        M5Stack CardKB I2C driver (i2c1, GP2=SDA, GP3=SCL, addr 0x5F)
     hw_config.c        FatFs_SPI hw config: spi1, MISO=12, MOSI=11, SCK=10, CS=22
-  dvi/                 (not yet implemented) DVI/HDMI target via RP2350 HSTX peripheral
-    dviout.*           HSTX init, TMDS encoding, DMA scan-out
-    display.c          320×200 framebuffer → 640×480 DVI (2× pixel-doubled, 40-row borders)
-    kbd_input.*        USB HID keyboard via TinyUSB
-    hw_config.c        FatFs_SPI hw config for SD card
+  dvi/                 DVI/HDMI target (Waveshare RP2350-PiZero) — third CMake target
+    display.cpp        320×200 framebuffer → 640×480 DVI via pico_lib (C++); core1 scanout
+    kbd_input.c        USB HID keyboard via PIO-USB host (tuh) + USB-C CDC stdio (tud)
+    hw_config.c        FatFs_SPI hw config (SD on spi1, dedicated bus)
+    tusb_config.h      TinyUSB config (host on rhport1/PIO, device on rhport0/native)
+    usb_descriptors.c  CDC device descriptors
+  pico_lib/            Shuichi Takano's pico DVI library (submodule) — PIO TMDS, NOT HSTX
 
 tinyagi-glfw/          Desktop GLFW port (reference; not actively developed)
 
@@ -54,22 +56,30 @@ cd tinyagi-rp2350
 mkdir -p build && cd build
 cmake .. -DPICO_SDK_PATH=/home/chneeb/Source/pico-sdk -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
-# produces tinyagi_picocalc.uf2 and tinyagi_restouch.uf2
+# produces tinyagi_picocalc.uf2, tinyagi_restouch.uf2, and tinyagi_dvi.uf2
 ```
 
-To build only one target: `make -j$(nproc) tinyagi_picocalc` or `make -j$(nproc) tinyagi_restouch`.
+To build only one target: `make -j$(nproc) tinyagi_picocalc`, `… tinyagi_restouch`, or `… tinyagi_dvi`.
 
-Requires Pico SDK 2.2.0, `PICO_BOARD=pico2` (RP2350 / Pico 2).
+Requires Pico SDK 2.2.0, `PICO_BOARD=pico2` (RP2350 / Pico 2). The `tinyagi_dvi`
+target is guarded by `if(EXISTS pico_lib/dvi/CMakeLists.txt)` — if the `pico_lib`
+submodule isn't checked out, only picocalc/restouch build.
 
 ### Per-target compile definitions
 
-| Define | PicoCalc | RESTOUCH | DVI (planned) |
+| Define | PicoCalc | RESTOUCH | DVI |
 |---|---|---|---|
-| `SOUND_ENABLED` | 1 | 0 | 1 |
+| `SOUND_ENABLED` | 1 | 0 | 0 (GPIO23 = SMPS pin) |
 | `KB_ENTER_CODE` | 0x0A | 0x0D | 0x0D |
-| `KB_F10_CODE` | 0x90 | 0x8A | HID scancode |
-| `SYS_CLOCK_KHZ` | 133000 | 300000 | 300000 |
+| `KB_F10_CODE` | 0x90 | 0x8A | 0x8A |
+| `SYS_CLOCK_KHZ` | 133000 | 300000 | 252000 (21×12 MHz, PIO-USB) |
 | `USE_VREG_BOOST` | 0 | 1 | 1 |
+
+DVI-only flags: `DVI_TARGET=1` (guards DVI code in shared main.c),
+`DVI_ENABLE_CDC` (1 = USB-C serial console; 0 = UART-only),
+`DVI_KEEPALIVE_TIMER=1` (workaround for the room-transition hang — see below),
+`DVI_SEVONPEND` (tried as root-cause fix, insufficient alone), plus
+`PICO_PIO_USE_GPIO_BASE=1`, `PICO_DEFAULT_PIO_USB_DP_PIN=28`.
 
 ## Hardware
 
@@ -89,16 +99,70 @@ Requires Pico SDK 2.2.0, `PICO_BOARD=pico2` (RP2350 / Pico 2).
 - M5Stack CardKB on i2c1 (SDA=GP2, SCL=GP3, I2C addr 0x5F).
 - No audio hardware; SOUND_ENABLED=0 stubs out the audio path at compile time.
 
-### DVI (`tinyagi_dvi` — not yet implemented)
-- RP2350 (Pico 2) at 300 MHz with vreg boost.
-- DVI/HDMI output via RP2350 **HSTX** peripheral (GPIO 12–19, 4 TMDS differential pairs). Do NOT use PicoDVI (PIO-based, RP2040-only). HSTX handles serialisation in hardware without dedicating a full core.
-- Output resolution: 640×480. AGI 320×200 frame pixel-doubled to 640×400, centred with 40-row black borders top and bottom. On-the-fly 2× scaling during scan-out — source framebuffer stays 320×200 (64 KB), no full 640×480 buffer needed.
-- USB HID keyboard via TinyUSB (bundled with Pico SDK). `kbd_read()` maps HID keycodes to AGI conventions.
-- SD card for game storage (same FatFs_SPI approach as other targets).
-- PWM audio on a free GPIO (SOUND_ENABLED=1).
-- HSTX DVI driver: base on pico-examples `hstx/dvi_out_hstx_encoder`. Main effort is TMDS encoding and DMA scan-out loop; integration into display.c is straightforward once the driver exists.
+### DVI (`tinyagi_dvi`) — Waveshare RP2350-PiZero (RP2350B)
+- RP2350B at **252 MHz** (vreg boost 1.20 V). 252 = 21×12 MHz, required by PIO-USB.
+- DVI via **pico_lib** (Shuichi Takano's PIO-based C++ DVI library), **NOT** HSTX. The
+  original plan was HSTX; the working implementation uses pico_lib because it was
+  already proven on this board (msx2pico). TMDS pins **GPIO 36/34/32** (Blue/Green/Red),
+  clock **GPIO 38** — GPIOs 32-39 need `PICO_PIO_USE_GPIO_BASE=1` (RP2350B extended range).
+- **Dual core**: core1 runs the DVI scanout loop (`core1_dvi_loop` in display.cpp) and owns
+  `DMA_IRQ_0`; core0 runs the game. `flush_display()` is a **no-op** — core1 continuously
+  scans the live `framebuffer[320*200]`. 640×480@60: each AGI pixel written 1:1 into the
+  left 320 of a 640-wide line buffer (right half black); pico_lib `N_LINE_PER_DATA=2`
+  line-doubles 240 scanlines → 480. (Horizontal is NOT full-screen — see known issues.)
+- **Keyboard**: USB HID via **PIO-USB host** (`tuh`, pio1, D+ on GPIO 28). `tuh_task()` is
+  pumped from `kbd_read()`.
+- **Console**: USB-C **CDC device** (`tud`, native controller) — pico_stdio_usb is blocked
+  when tinyusb_host is linked, so we register our own stdio driver (`cdc_stdio_init`).
+  UART0 (GP0) stdio is also enabled.
+- SD card on **spi1** (dedicated bus, no LCD sharing), `DMA_IRQ_1`. FatFs `set_spi_dma_irq_channel(true,true)`.
+- No audio: `SOUND_ENABLED=0` (GPIO23 is the RP2350-PiZero SMPS mode pin).
 
 ## Key design decisions & fixes applied
+
+### DVI: core0 stack relocated to main SRAM (critical)
+The default RP2350 layout puts core0's stack in **SCRATCH_Y (only 4 KB)**, directly above
+**SCRATCH_X**, which holds pico_lib's hand-written TMDS encode loops (`tmds_encode_loop_16bpp*`)
+and the TMDS table. Deep AGI recursion (`call`/`new_room`) + FatFs + TinyUSB overflow 4 KB and
+grow down into SCRATCH_X, **corrupting the encoder code core1 is executing** → core1 faults →
+screen goes dark. Fix: `main()` (DVI only) switches MSP to a 32 KB `core0_stack[]` in main SRAM
+before calling `agi_main()`, so core0's stack can never reach SCRATCH_X. This was the cause of
+the original "screen goes dark after Starting:" crash. (msx2pico survives on 4 KB because fMSX
+is iterative; AGI's logic recursion is deeper.)
+
+### DVI: non-blocking USB-CDC output (critical)
+`cdc_out_chars()` (dvi/kbd_input.c) must **never block**. It writes what fits in the TX buffer
+and **drops the rest** — it must not spin waiting for the host to drain. An earlier blocking
+version froze core0 inside `printf` under heavy debug output (every SD read printed). Corollary
+for debugging: USB-CDC output only reaches the host while core0 pumps `tud_task()` (from
+`kbd_read()`), so **any core0 hang kills the console** — a core0 crash looks completely silent
+over USB-CDC. Use UART (GP0, 115200) to see output that survives a core0 hang; the fault handler
+in display.cpp (`isr_hardfault`) prints there.
+
+### DVI: room-transition hang worked around by keep-alive timer (real fix TODO)
+Intermittent hang on room transitions (screen black, F7 dead, no `HARDFAULT` on UART = a *hang*,
+not a fault). Root cause is a **lost-wakeup / IRQ-timing race**: the SD driver waits on each DMA
+transfer via `__wfe` (`sem_acquire_timeout_ms`, 1 s timeout); under DVI-DMA contention a wakeup
+is occasionally missed → the wait rides out to the 1 s timeout → the SD read returns *failure* →
+the game gets a NULL/short resource → hang (the near-1s waits also explain slow transitions).
+A/B-confirmed: a **no-op 250 ms periodic timer** (`DVI_KEEPALIVE_TIMER=1` in main.c) prevents it
+by giving core0 a regular wakeup to re-check the completed transfer. `SEVONPEND` alone did NOT
+fix it. The keep-alive timer is a workaround; the principled fix (make the SD wait poll-safe, or
+similar) is still TODO.
+
+### DVI: sound completion on SOUND_ENABLED=0
+`agi_play_sound()` (platform.c, `#else` branch) signals sound completion **synchronously**
+(`state.flags[sound_flag]=true; sound_flag=-1`) because a game logic that waits for a sound is
+often a tight bytecode goto-loop that never returns to the main loop — a deferred
+`platform_tick_sound()` would never run. Without this the game hangs at the first `sound()`.
+Also benefits the restouch target (also `SOUND_ENABLED=0`).
+
+### DVI: display model (black-during-load + tearing)
+core1 scans the live framebuffer with no double-buffering, so intermediate states during a room
+load (e.g. `text_screen()` → `clear_lines(0,25,0)` blanks to black) are visible as a black screen
+for the whole load, and sprite draws tear. PicoCalc hides this because its LCD only updates on the
+per-cycle `flush_display()` push (a "hold" display). Fix (TODO): double-buffer — core1 scans a
+front buffer, `flush_display()` copies the composed framebuffer into it once per cycle.
 
 ### Framebuffer layout
 - `framebuffer[320 * 200]` — 1 byte per pixel, AGI colour index 0-15.
@@ -199,6 +263,20 @@ Decrypts messages with the "Avis Durgan" XOR key. Useful for understanding why a
 
 ## Known issues / TODO
 
+### DVI: room-transition hang — only worked around, not root-caused
+Lost-wakeup race in the SD `__wfe` wait, currently masked by `DVI_KEEPALIVE_TIMER`
+(see "DVI: room-transition hang" under Key design decisions). Real fix TODO.
+
+### DVI: horizontal is left-half only (not full-screen)
+The 320-pixel AGI frame is written 1:1 into the left 320 of the 640-wide DVI line, so game
+content occupies the left half with the right half black. True full-screen needs horizontal
+2× (pixel-doubling into all 640), but naive doubling made the 8px chooser font "fat"; a clean
+fix is a mode flag that doubles for the game but renders text 1:1, or a 640-wide text path.
+
+### DVI: no double-buffer → black-during-load + tearing
+See "DVI: display model" under Key design decisions. Fix is a front/back framebuffer swapped
+in `flush_display()`.
+
 ### RESTOUCH: SPI clock drops to 12.5 MHz after SD card access
 `lcdspi_init()` configures spi1 at 80 MHz. The FatFs_SPI library's `my_spi_init()` calls `spi_init(spi1, ...)` (one-time, guarded) then `spi_set_baudrate(spi1, 12.5 MHz)` on each SD access. After any SD read, spi1 is left at 12.5 MHz and all subsequent LCD operations (framebuffer flushes, startup text) run at that reduced rate. ST7789 is within spec at 12.5 MHz so rendering is correct but slower. Fix: call `spi_set_baudrate(LCD_SPI_PORT, LCD_SPI_CLOCK_HZ)` at the start of `lcdspi_set_address()`.
 
@@ -231,3 +309,8 @@ Implemented and working. No "Game saved" / "Game restored" dialog is shown — t
 - **Space Quest 1** — plays through correctly; menu, F1, quit, save/restore all work. Library computer terminal (text_screen mode) works. Typing "exit" at the terminal falls through silently (correct — word group 157 is not handled by the library logic; type an unrecognised word or press ESC to close the terminal cleanly).
 - **Space Quest 2** — plays through correctly including intro sequence.
 - **Police Quest 1** — partially tested. Newspaper room (Logic 116) renders correctly with the rendering-order fix; character sprite appears as a dark silhouette on idle frames (see display overlay buffer TODO). Exit via "close paper", "put down paper", or "stop reading".
+
+Per-target notes: PicoCalc and RESTOUCH play the above. The **DVI** target boots, runs the
+chooser, and plays SQ1 (walking, room transitions, save/restore) with `DVI_KEEPALIVE_TIMER=1`;
+outstanding DVI items are the three known issues above (root-cause of the hang, full-screen
+horizontal scaling, double-buffering).

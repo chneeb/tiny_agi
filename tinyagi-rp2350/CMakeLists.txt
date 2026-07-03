@@ -68,6 +68,7 @@ target_compile_definitions(tinyagi_picocalc PRIVATE
     KB_F10_CODE=0x90
     SYS_CLOCK_KHZ=133000
     USE_VREG_BOOST=0
+    AUDIO_PIN=26
 )
 
 target_link_libraries(tinyagi_picocalc
@@ -146,3 +147,70 @@ target_link_libraries(tinyagi_restouch
 pico_enable_stdio_usb(tinyagi_restouch 1)
 pico_enable_stdio_uart(tinyagi_restouch 1)
 pico_add_extra_outputs(tinyagi_restouch)
+
+# ── DVI target (Waveshare RP2350-PiZero) — requires pico_lib submodule ───────
+# Guard: if the submodule is not checked out, this block is silently skipped
+# and the picocalc/restouch targets still build normally.
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/pico_lib/dvi/CMakeLists.txt)
+    add_subdirectory(pico_lib/dvi  ${CMAKE_CURRENT_BINARY_DIR}/pico_lib_dvi)
+    add_subdirectory(pico_lib/util ${CMAKE_CURRENT_BINARY_DIR}/pico_lib_util)
+
+    add_executable(tinyagi_dvi
+        ${COMMON_SOURCES}
+        ${AUDIO_SOURCES}
+        dvi/display.cpp
+        dvi/kbd_input.c
+        dvi/hw_config.c
+        dvi/usb_descriptors.c
+    )
+
+    target_include_directories(tinyagi_dvi PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/dvi
+        ${FATFS_DIR}/ff15/source
+        ${FATFS_DIR}/sd_driver
+        ${FATFS_DIR}/include
+        pico_lib
+    )
+
+    target_compile_definitions(tinyagi_dvi PRIVATE
+        DVI_TARGET=1                   # enables DVI-only debug hooks in shared main.c
+        DVI_ENABLE_CDC=0               # 1 = USB-C serial console; 0 = UART-only (crash isolation test)
+        DVI_KEEPALIVE_TIMER=1          # workaround for lost-wakeup room-transition hang (confirmed)
+        DVI_SEVONPEND=0                # (tried as root-cause fix; insufficient alone — left for reference)
+        SOUND_ENABLED=0                # GPIO 23 is SMPS mode pin on RP2350-PiZero — audio disabled
+        KB_ENTER_CODE=0x0D
+        KB_F10_CODE=0x8A
+        SYS_CLOCK_KHZ=252000          # 21 x 12 MHz — PIO-USB constraint
+        USE_VREG_BOOST=1
+        PICO_PIO_USE_GPIO_BASE=1       # DVI uses GPIO 32-39 (RP2350B extended range)
+        PICO_DEFAULT_PIO_USB_DP_PIN=28 # PIO-USB D+ on GPIO 28
+        PICO_STACK_SIZE=4096
+        PICO_CORE1_STACK_SIZE=3072
+        CFG_TUSB_CONFIG_FILE="tusb_config.h"
+    )
+
+    target_link_libraries(tinyagi_dvi
+        tinyagi
+        pico_stdlib
+        pico_multicore
+        hardware_clocks
+        hardware_vreg
+        hardware_spi
+        hardware_dma
+        hardware_pio
+        hardware_pwm
+        hardware_irq
+        hardware_interp
+        dvi
+        util
+        tinyusb_device
+        tinyusb_host
+        tinyusb_board
+        tinyusb_pico_pio_usb
+    )
+
+    pico_enable_stdio_usb(tinyagi_dvi 0)   # blocked: SDK disables USB stdio when tinyusb_host is linked
+    pico_enable_stdio_uart(tinyagi_dvi 1)
+    pico_add_extra_outputs(tinyagi_dvi)
+endif()
