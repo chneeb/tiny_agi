@@ -143,19 +143,25 @@ for debugging: USB-CDC output only reaches the host while core0 pumps `tud_task(
 over USB-CDC. Use UART (GP0, 115200) to see output that survives a core0 hang; the fault handler
 in display.cpp (`isr_hardfault`) prints there.
 
-### DVI: room-transition hang — ROOT CAUSE traced (keep-alive is a workaround)
+### DVI: room-transition hang — workaround in place, mechanism only partly pinned
 Intermittent hang on room transitions (screen black, F7 dead, no `HARDFAULT` on UART = a *hang*,
-not a fault). **Root cause (traced through the pico-sdk):** every SD block read (`spi_transfer`
-in the FatFs_SPI driver) waits on its DMA via `sem_acquire_timeout_ms(1000)` →
-`best_effort_wfe_or_timeout` → **`__wfe`**, released from the SD DMA-completion IRQ
-(`sem_release` → `__sev`). This is a **cross-core, event/WFE-based** wait, which the SDK itself
-documents as best-effort ("the IRQ may be happening on the other core … callers must poll in a
-loop"). Under sustained **core1 DVI-DMA** activity the cross-core wakeup is intermittently lost;
-core0 then sleeps until the **1 s timeout** → `sem_acquire` returns false → the block read reports
-**failure** → the AGI engine gets a NULL/short resource → hang.
+not a fault). The wait involved: every SD block read (`spi_transfer` in the FatFs_SPI driver)
+waits on its DMA via `sem_acquire_timeout_ms(1000)` → `best_effort_wfe_or_timeout` → **`__wfe`**,
+released from the SD DMA-completion IRQ (`sem_release` → `__sev`) — a **cross-core, event/WFE-based**
+wait the SDK itself calls best-effort ("the IRQ may be happening on the other core … callers must
+poll in a loop"). Working theory: under sustained **core1 DVI-DMA** activity the cross-core wakeup
+is intermittently lost → core0 rides the wait toward the timeout → `sem_acquire` fails → the block
+read reports **failure** → the AGI engine gets a NULL/short resource → hang.
 - **Keep-alive masks it** (`DVI_KEEPALIVE_TIMER=1`, main.c): a periodic timer IRQ wakes core0
   every ~250 ms (or ~2 ms via the HDMI-audio timer); on re-check the DMA *had* completed, so the
-  read succeeds instead of timing out. It never fixes the lost event — just re-polls often enough.
+  read succeeds instead of failing. It never fixes the lost event — just re-polls often enough.
+  A/B-confirmed: timer off = hang, timer on = stable.
+- **CAVEAT — the mechanism above is NOT fully consistent.** PIO-USB runs its own **1 ms SOF
+  repeating timer on core0** (its own alarm pool, HW alarm #2 — see `pio_usb_host.c` `start_timer`).
+  That already wakes core0 every ~1 ms, so a plain "lost wakeup rides to the 1 s timeout" can't be
+  literally right (something should wake it within 1 ms). The keep-alive is still empirically
+  required, so the true trigger is subtler — likely in how `best_effort_wfe_or_timeout` arms/cancels
+  default-pool alarms under SD-read churn, or an interaction between the two alarm pools. Not pinned.
 - **`SEVONPEND` did NOT help** — it only makes a *pending interrupt* wake `__wfe`; here the
   interrupt fired, it's the cross-core *event* that's lost. Different failure.
 - **A bigger/fuller/fragmented FAT partition amplifies it** (not causes it): more FAT/directory
@@ -181,10 +187,23 @@ Enabling audio glitches the DVI signal on **some monitors** (screen black, monit
   the video-only monitor is solid with the audio build.
 - **It's monitor-dependent**: a monitor with **no audio** works fine with audio enabled; a monitor
   that **decodes HDMI audio** still glitches. So the remaining cause is almost certainly the
-  **audio data-islands themselves** — malformed / spec-marginal CTS-N, audio InfoFrame, or pico_lib's
-  data-island timing — which an audio-decoding sink rejects (drops sync) while a non-decoding sink
-  ignores. TODO: verify CTS/N vs the real ~25.2 MHz pixel clock and pico_lib's data-island output
-  against the HDMI spec (or against a monitor that's happy with it).
+  **audio data-islands themselves** — an audio-decoding sink rejects (drops sync) while a
+  non-decoding sink ignores them.
+- **Data-island spec fixes tried — did NOT resolve it.** Three genuine bugs were found and patched
+  in `pico_lib/dvi/data_packet.cpp` + `dvi_audio_init()`, but the audio monitor still glitched, so
+  they are **not the (whole) cause**. Reverted (kept the submodule pristine); left here as hints
+  for whoever resumes — they're worth applying anyway, ideally as a **fork/PR to pico_lib** rather
+  than editing the vendored submodule:
+    1. `DataPacket::setAudioSample()`: the IEC-60958 block-start flag uses `frameCt < 4`; it should
+       be `frameCt < n` (only flag a subpacket that actually carries a sample). With ~1–2 samples
+       per packet this mis-flags most of the ~230 block boundaries/sec.
+    2. Same function: `vuc = 1` marks every sample **invalid**; IEC-60958 validity is inverted —
+       `0` = valid.
+    3. `dvi_audio_init()`: N for 44.1 kHz should be **6272**, not 6144 (6144 is the 48 kHz value).
+       At our exact 25.2 MHz pixel clock N=6272 gives CTS=28000 exactly (zero ACR error).
+  Since these didn't fix it, the real cause may be data-island **timing/placement** (guard bands,
+  packet scheduling under `N_LINE_PER_DATA=2` line-doubling) or something the specific sink is
+  strict about — needs a capture/analyzer or a known-good HDMI-audio reference to pin down.
 Mitigation for now: shipped off (`SOUND_ENABLED=0` + `DVI_HDMI_AUDIO=0`); code stays behind the flag.
 
 Note: with `SOUND_ENABLED=1`, sound-done is signalled by the real path (`platform_tick_sound()`
