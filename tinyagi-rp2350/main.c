@@ -42,6 +42,35 @@ static bool keepalive_cb(struct repeating_timer *t) {
 }
 #endif
 
+/* DVI_DBG_TIMER: periodic UART diagnostic to categorise the "goes dark" failure.
+ *   hb   = main-loop heartbeat (core0 game loop alive?)
+ *   loop = core1 fill-loop frame count (core1 producing TMDS?)
+ *   scan = DVI DMA IRQ frame count   (core1 scanout DMA alive?)
+ * Reading it while dark:
+ *   hb++ , loop++/scan++  -> everything runs; dark = monitor rejecting signal
+ *   hb++ , loop/scan froze -> core1 DVI DMA stopped (signal loss / core1 hung)
+ *   hb froze, loop/scan++  -> core0 game loop stuck, core1 fine
+ *   no output at all       -> core0 IRQs off (deadlock) or UART dead
+ *   "*** HARDFAULT ..."    -> a crash (PC tells where)  */
+#ifndef DVI_DBG_TIMER
+#define DVI_DBG_TIMER 0
+#endif
+#if DVI_DBG_TIMER
+uint32_t dvi_debug_get_loop_frames(void);
+uint32_t dvi_debug_get_scanout_frames(void);
+void     dvi_debug_print_fault(void);
+static volatile uint32_t g_dbg_hb = 0;
+static bool dbg_timer_cb(struct repeating_timer *t) {
+    (void)t;
+    printf("DVIdbg hb=%lu loop=%lu scan=%lu\n",
+           (unsigned long)g_dbg_hb,
+           (unsigned long)dvi_debug_get_loop_frames(),
+           (unsigned long)dvi_debug_get_scanout_frames());
+    dvi_debug_print_fault();
+    return true;
+}
+#endif
+
 #if DVI_HDMI_AUDIO
 /* HDMI-audio producer (see dvi/display.cpp).  A ~2 ms timer keeps pico_lib's
  * ring topped up from the current 3-channel synth state, independent of the
@@ -121,6 +150,10 @@ int main(void) {
     static struct repeating_timer keepalive_timer;
     add_repeating_timer_ms(DVI_KEEPALIVE_MS, keepalive_cb, NULL, &keepalive_timer);
 #endif
+#if DVI_DBG_TIMER
+    static struct repeating_timer dbg_timer;
+    add_repeating_timer_ms(500, dbg_timer_cb, NULL, &dbg_timer);
+#endif
 
     while (1) {
         if (!show_dir_chooser(game_dir, sizeof(game_dir))) {
@@ -137,7 +170,9 @@ int main(void) {
 
         while (1) {
             uint32_t now_ms = to_ms_since_boot(get_absolute_time());
-
+#if DVI_DBG_TIMER
+            g_dbg_hb++;   /* main-loop heartbeat, watched by dbg_timer_cb */
+#endif
             check_key();
 
             bool did_run = agi_logic_run_cycle(now_ms);

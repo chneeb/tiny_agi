@@ -34,11 +34,13 @@ tinyagi-rp2350/        Merged RP2350 port — PicoCalc and RESTOUCH as two CMake
     kbd_input.*        M5Stack CardKB I2C driver (i2c1, GP2=SDA, GP3=SCL, addr 0x5F)
     hw_config.c        FatFs_SPI hw config: spi1, MISO=12, MOSI=11, SCK=10, CS=22
   dvi/                 DVI/HDMI target (Waveshare RP2350-PiZero) — third CMake target
-    display.cpp        320×200 framebuffer → 640×480 DVI via pico_lib (C++); core1 scanout
+    display.cpp        320×200 framebuffer → 640×480 DVI via pico_lib (C++); core1 scanout, double-buffered
     kbd_input.c        USB HID keyboard via PIO-USB host (tuh) + USB-C CDC stdio (tud)
     hw_config.c        FatFs_SPI hw config (SD on spi1, dedicated bus)
+    sd_spi_poll.c      Patched copy of FatFs_SPI spi.c — polls DMA instead of the sem/WFE wait (DVI only)
     tusb_config.h      TinyUSB config (host on rhport1/PIO, device on rhport0/native)
     usb_descriptors.c  CDC device descriptors
+  patches/             Standalone patches not applied to the tree (e.g. dircache_faster_loads.patch)
   pico_lib/            Shuichi Takano's pico DVI library (submodule) — PIO TMDS, NOT HSTX
 
 tinyagi-glfw/          Desktop GLFW port (reference; not actively developed)
@@ -69,18 +71,22 @@ submodule isn't checked out, only picocalc/restouch build.
 
 | Define | PicoCalc | RESTOUCH | DVI |
 |---|---|---|---|
-| `SOUND_ENABLED` | 1 | 0 | 0 default (HDMI audio impl exists, off — open issue) |
+| `SOUND_ENABLED` | 1 | 0 | 1 (HDMI data-island audio) |
 | `KB_ENTER_CODE` | 0x0A | 0x0D | 0x0D |
 | `KB_F10_CODE` | 0x90 | 0x8A | 0x8A |
 | `SYS_CLOCK_KHZ` | 133000 | 300000 | 252000 (21×12 MHz, PIO-USB) |
 | `USE_VREG_BOOST` | 0 | 1 | 1 |
 
-DVI-only flags: `DVI_TARGET=1` (guards DVI code in shared main.c),
-`DVI_ENABLE_CDC` (1 = USB-C serial console; 0 = UART-only),
-`DVI_KEEPALIVE_TIMER=1` (workaround for the room-transition hang — see below),
-`DVI_HDMI_AUDIO` (sound as HDMI data-island audio — impl works but **off by default**:
-glitches audio-decoding monitors — see below), plus
-`PICO_PIO_USE_GPIO_BASE=1`, `PICO_DEFAULT_PIO_USB_DP_PIN=28`.
+DVI-only flags (current defaults): `DVI_TARGET=1` (guards DVI code in shared main.c),
+`DVI_ENABLE_CDC=0` (1 = USB-C serial console; 0 = UART-only),
+`DVI_KEEPALIVE_TIMER=1` (secondary belt for the room-transition hang — see below),
+`DVI_DOUBLE_BUFFER=1` (core1 scans a front buffer; flush copies once/cycle — see below),
+`DVI_HDMI_AUDIO=1` (sound as HDMI data-island audio — **on by default now**, but see the
+blanking/audio open issues below), `DVI_DBG_TIMER=0` (UART failure-mode diagnostic, off),
+plus `PICO_PIO_USE_GPIO_BASE=1`, `PICO_DEFAULT_PIO_USB_DP_PIN=28`. The DVI target also
+compiles a **patched SD driver** (`dvi/sd_spi_poll.c`) instead of the stock `spi.c` — see
+"DVI: SD read via DMA poll" below. `DVI_DMA_BUS_PRIORITY` was tried and **removed** (no help;
+A/B'd marginally worse, including with audio).
 
 ## Hardware
 
@@ -107,8 +113,10 @@ glitches audio-decoding monitors — see below), plus
   already proven on this board (msx2pico). TMDS pins **GPIO 36/34/32** (Blue/Green/Red),
   clock **GPIO 38** — GPIOs 32-39 need `PICO_PIO_USE_GPIO_BASE=1` (RP2350B extended range).
 - **Dual core**: core1 runs the DVI scanout loop (`core1_dvi_loop` in display.cpp) and owns
-  `DMA_IRQ_0`; core0 runs the game. `flush_display()` is a **no-op** — core1 continuously
-  scans the live `framebuffer[320*200]`. 640×480@60: each AGI pixel written 1:1 into the
+  `DMA_IRQ_0`; core0 runs the game. With `DVI_DOUBLE_BUFFER=1` (default) core1 scans a
+  dedicated `scanout_buffer[320*200]` and `flush_display()` `memcpy`s the composed
+  `framebuffer` into it once per cycle (so only completed frames show — no black flash
+  mid-load, less tearing). 640×480@60: each AGI pixel written 1:1 into the
   left 320 of a 640-wide line buffer (right half black); pico_lib `N_LINE_PER_DATA=2`
   line-doubles 240 scanlines → 480. (Horizontal is NOT full-screen — see known issues.)
 - **Keyboard**: USB HID via **PIO-USB host** (`tuh`, pio1, D+ on GPIO 28). `tuh_task()` is
@@ -117,10 +125,12 @@ glitches audio-decoding monitors — see below), plus
   when tinyusb_host is linked, so we register our own stdio driver (`cdc_stdio_init`).
   UART0 (GP0) stdio is also enabled.
 - SD card on **spi1** (dedicated bus, no LCD sharing), `DMA_IRQ_1`. FatFs `set_spi_dma_irq_channel(true,true)`.
-- Audio: no PWM DAC (GPIO23 is the RP2350-PiZero SMPS pin).  An **HDMI data-island audio**
-  path exists (`DVI_HDMI_AUDIO`) and works, but is **off by default** — enabling it glitches the
-  DVI signal on monitors that decode HDMI audio (open issue; see below).  When enabled it plays
-  only through an HDMI sink that decodes audio; a pure DVI display stays silent.
+- Audio: no PWM DAC (GPIO23 is the RP2350-PiZero SMPS pin).  Sound plays via an **HDMI
+  data-island audio** path (`DVI_HDMI_AUDIO`, `SOUND_ENABLED`), **on by default now**. It
+  plays only through an HDMI sink that decodes audio; a pure DVI display stays silent. Caveat:
+  on **audio-decoding** monitors it can still glitch the DVI signal (see open issues) — the
+  bus-priority hardening that used to mask that has been removed, so if a specific audio
+  monitor mis-behaves, building with `SOUND_ENABLED=0 DVI_HDMI_AUDIO=0` is the fallback.
 
 ## Key design decisions & fixes applied
 
@@ -143,7 +153,7 @@ for debugging: USB-CDC output only reaches the host while core0 pumps `tud_task(
 over USB-CDC. Use UART (GP0, 115200) to see output that survives a core0 hang; the fault handler
 in display.cpp (`isr_hardfault`) prints there.
 
-### DVI: room-transition hang — workaround in place, mechanism only partly pinned
+### DVI: room-transition hang — DMA-poll SD driver applied + keep-alive kept
 Intermittent hang on room transitions (screen black, F7 dead, no `HARDFAULT` on UART = a *hang*,
 not a fault). The wait involved: every SD block read (`spi_transfer` in the FatFs_SPI driver)
 waits on its DMA via `sem_acquire_timeout_ms(1000)` → `best_effort_wfe_or_timeout` → **`__wfe`**,
@@ -166,11 +176,18 @@ read reports **failure** → the AGI engine gets a NULL/short resource → hang.
   interrupt fired, it's the cross-core *event* that's lost. Different failure.
 - **A bigger/fuller/fragmented FAT partition amplifies it** (not causes it): more FAT/directory
   sector reads per transition = more `__wfe` waits = more chances to hit the intermittent race.
-- **Real fix (TODO, not applied):** `dma_channel_wait_for_finish_blocking()` is a *pure hardware
-  poll* (`while (dma_channel_is_busy) tight_loop_contents()`, no WFE) — immune to the race. Make
-  `spi_transfer()` poll `dma_channel_is_busy(rx_dma)` with a `time_reached()` timeout instead of
-  the semaphore, then the keep-alive can be removed. Caveat: `spi_transfer` is in the vendored
-  `fatfs/FatFs_SPI` submodule, so this means patching/forking the submodule.
+- **Real fix — APPLIED (`dvi/sd_spi_poll.c`).** `spi_transfer()` now polls the DMA hardware
+  BUSY bit (`while (dma_channel_is_busy(rx_dma)) { if time_reached(deadline) fail; tight_loop_contents(); }`)
+  instead of the semaphore/`__wfe` wait — a pure hardware poll, immune to the lost-wakeup. Because
+  `spi_transfer` lives in the vendored `fatfs/FatFs_SPI` submodule, this is done **without editing
+  the submodule**: `dvi/sd_spi_poll.c` is a patched *copy* of the driver's `spi.c` (only the wait
+  changed, ~15 lines), swapped in for the DVI target only via the CMakeLists per-target `spi.c`
+  split; picocalc/restouch keep the stock file. (Silent-divergence caveat: a future FatFs update
+  to `spi.c` won't reach the copy.)
+- **Both the poll driver AND the keep-alive are kept.** The poll driver is the root fix, but A/B
+  on device showed the DVI is **much worse with the poll driver removed** (keep-alive alone is not
+  enough), so the fork earns its place; the keep-alive stays as a cheap secondary belt. `DVI_DMA_BUS_PRIORITY`
+  was also tried here and **removed** — no help, marginally worse (see below).
 
 ### DVI: HDMI data-island audio (`DVI_HDMI_AUDIO`)
 AGI sound plays through the HDMI stream (monitor speakers) since there's no PWM DAC pin. Reuses
@@ -211,18 +228,23 @@ sees `agi_sound_is_playing()` go false), replacing the earlier synchronous-compl
 was only needed when `SOUND_ENABLED=0`. That hack (`agi_play_sound()` `#else` branch) still exists
 for the restouch target (`SOUND_ENABLED=0`), where a sound-wait would otherwise hang forever.
 
-### DVI: DMA bus priority
-`display_init()` sets `bus_ctrl_hw->priority = DMA_R | DMA_W` so the DVI scan-out DMA wins bus
-arbitration over the cores. pico_lib doesn't do this; without it the scan-out DMA can be starved
-by core-side SRAM traffic → TMDS underrun → the monitor loses sync (black ~10 s). Applied
-unconditionally (hardens the signal in general); pico-infonesPlus does the same for RP2350 HDMI.
+### DVI: DMA bus priority — tried and REMOVED
+`display_init()` used to set `bus_ctrl_hw->priority = DMA_R | DMA_W` (DVI scan-out DMA wins bus
+arbitration over the cores) to harden the signal against core-side SRAM traffic. **Removed** after
+on-device A/B: it made **no positive difference** and was **marginally worse** — because it also
+makes core0's **SD DMA outrank core1's software-TMDS fill loop**. Tested both with audio off and on
+(the audio case was the original reason it was added); neither benefited. The code is gone, not just
+flag-gated. If a future audio-decoding-monitor issue needs it back, it was
+`bus_ctrl_hw->priority = BUSCTRL_BUS_PRIORITY_DMA_W_BITS | BUSCTRL_BUS_PRIORITY_DMA_R_BITS`.
 
-### DVI: display model (black-during-load + tearing)
-core1 scans the live framebuffer with no double-buffering, so intermediate states during a room
-load (e.g. `text_screen()` → `clear_lines(0,25,0)` blanks to black) are visible as a black screen
-for the whole load, and sprite draws tear. PicoCalc hides this because its LCD only updates on the
-per-cycle `flush_display()` push (a "hold" display). Fix (TODO): double-buffer — core1 scans a
-front buffer, `flush_display()` copies the composed framebuffer into it once per cycle.
+### DVI: display model — double-buffered (implemented)
+`DVI_DOUBLE_BUFFER=1` (default): core1 scans a dedicated `scanout_buffer`, and `flush_display()`
+`memcpy`s the composed `framebuffer` into it once per cycle. So intermediate states during a room
+load are no longer shown and sprite draws don't tear — same "hold" behaviour PicoCalc gets from its
+per-cycle LCD push. Costs +64 KB SRAM. `DVI_DOUBLE_BUFFER=0` reverts to live-scan of the framebuffer
+(A/B'd **much worse** — core1 reads the framebuffer while core0 writes it, and it dies fast). Note
+this does **not** fix the room-transition *signal blanking* — that's a separate, deeper issue (see
+"DVI: room-transition signal blanking" under Known issues).
 
 ### Framebuffer layout
 - `framebuffer[320 * 200]` — 1 byte per pixel, AGI colour index 0-15.
@@ -323,20 +345,34 @@ Decrypts messages with the "Avis Durgan" XOR key. Useful for understanding why a
 
 ## Known issues / TODO
 
-### DVI: room-transition hang — root-caused, workaround in place
-Cross-core lost-wakeup in the SD `sem_acquire`/`__wfe` DMA wait under DVI-DMA contention (full
-trace under "DVI: room-transition hang" in Key design decisions). Masked by `DVI_KEEPALIVE_TIMER`.
-Real fix (make `spi_transfer` poll `dma_channel_is_busy` instead of the semaphore) is understood
-but not applied — it means patching the vendored FatFs_SPI submodule.
+### DVI: room-transition hang — FIXED (DMA-poll SD driver)
+Was a cross-core lost-wakeup in the SD `sem_acquire`/`__wfe` DMA wait under DVI-DMA contention.
+Fixed by `dvi/sd_spi_poll.c` (patched-copy SD driver that polls `dma_channel_is_busy` instead of
+the semaphore) — see "DVI: room-transition hang" in Key design decisions. The poll driver is
+**required** (on-device A/B: much worse without it); the keep-alive is kept as a secondary belt.
 
-### DVI: HDMI audio glitches audio-decoding monitors (off by default)
-`DVI_HDMI_AUDIO=1` works (sound plays) but glitches the DVI signal on **monitors that decode HDMI
-audio** (screen black, monitor re-syncs after ~10 s); a monitor with no audio is fine with the same
-build. Ruled out power (two good supplies) and bus contention (the DMA bus-priority fix hardened the
-non-audio case). Remaining suspect: the **audio data-islands** (CTS-N / audio InfoFrame / pico_lib
-data-island spec compliance) which an audio sink rejects. Shipped **off**; code stays behind the
-flag. Next: validate CTS/N against the ~25.2 MHz pixel clock + pico_lib's data-island output. Full
-analysis under "DVI: HDMI data-island audio" in Key design decisions.
+### DVI: room-transition *signal blanking* — OPEN (the remaining hard one)
+Distinct from the hang above. During a room load the DVI **signal drops**: the monitor goes dark
+for a few seconds (it's re-syncing after signal loss) and sometimes never recovers. Root cause:
+pico_lib generates TMDS in **software on core1's CPU** (a per-scanline fill loop with hard real-time
+deadlines), and core0's sustained transition work — mainly **pic/view decode** (heavy framebuffer
+writes) plus the per-cycle 64 KB double-buffer copy — starves that fill loop at the SRAM level → the
+TMDS feed misses its deadline → signal drops. A CPU fill loop can't be given bus priority over
+another CPU, so this can't be tuned away. **What was tried and did NOT fix it:** SD-read reduction
+(dir-file cache + single-open — cut file-opens ~3×, ruling SD *out* as the dominant cause), more
+pico_lib buffers (`N_BUFFERS` 5→16), DMA bus-priority (on and off), double-buffer on/off. **The real
+fix is HSTX** — the RP2350 hardware TMDS serializer needs no core1 fill loop, so DMA (which *can* win
+bus priority) feeds it directly and core0 can't starve it. That's a display-driver rewrite (was the
+original plan). Until then the DVI target plays but glitches on transitions.
+
+### DVI: HDMI audio glitches audio-decoding monitors (audio ON by default)
+`DVI_HDMI_AUDIO=1`/`SOUND_ENABLED=1` (now default) play sound via HDMI data-islands, but can glitch
+the DVI signal on **monitors that decode HDMI audio** (black, re-sync ~10 s); a monitor with no audio
+is fine with the same build. Ruled out power (two good supplies). The DMA bus-priority that once
+masked the non-audio case has since been removed (it didn't help overall). Remaining suspect: the
+**audio data-islands** (CTS-N / audio InfoFrame / pico_lib data-island spec compliance) which an
+audio sink rejects — see the fix hints under "DVI: HDMI data-island audio". Fallback for a
+mis-behaving audio monitor: build with `SOUND_ENABLED=0 DVI_HDMI_AUDIO=0`.
 
 ### DVI: horizontal is left-half only (not full-screen)
 The 320-pixel AGI frame is written 1:1 into the left 320 of the 640-wide DVI line, so game
@@ -344,9 +380,18 @@ content occupies the left half with the right half black. True full-screen needs
 2× (pixel-doubling into all 640), but naive doubling made the 8px chooser font "fat"; a clean
 fix is a mode flag that doubles for the game but renders text 1:1, or a 640-wide text path.
 
-### DVI: no double-buffer → black-during-load + tearing
-See "DVI: display model" under Key design decisions. Fix is a front/back framebuffer swapped
-in `flush_display()`.
+### DVI: double-buffer — DONE
+Implemented (`DVI_DOUBLE_BUFFER=1`, default): core1 scans a `scanout_buffer` that `flush_display()`
+copies the composed framebuffer into once per cycle. Removes the black-during-load flash and tearing.
+See "DVI: display model" under Key design decisions. (Does not fix the transition *signal blanking*.)
+
+### Available (not applied): dir-cache "faster loads" patch
+`tinyagi-rp2350/patches/dircache_faster_loads.patch` — an engine-level speedup (caches the 4 dir
+files in RAM + reads each resource's size-header and data in one `f_open` instead of two), cutting
+per-transition file-opens ~3×. Correctness-preserving, benefits all targets. It was written and
+tested on the DVI target while chasing the signal blanking; it did **not** fix the blanking (which
+is why SD was ruled out as the cause), so it was reverted to keep the shared engine as-tested. Kept
+as a patch to reinstate as a standalone "faster loads" commit if wanted — `git apply` from repo root.
 
 ### RESTOUCH: SPI clock drops to 12.5 MHz after SD card access
 `lcdspi_init()` configures spi1 at 80 MHz. The FatFs_SPI library's `my_spi_init()` calls `spi_init(spi1, ...)` (one-time, guarded) then `spi_set_baudrate(spi1, 12.5 MHz)` on each SD access. After any SD read, spi1 is left at 12.5 MHz and all subsequent LCD operations (framebuffer flushes, startup text) run at that reduced rate. ST7789 is within spec at 12.5 MHz so rendering is correct but slower. Fix: call `spi_set_baudrate(LCD_SPI_PORT, LCD_SPI_CLOCK_HZ)` at the start of `lcdspi_set_address()`.

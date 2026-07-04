@@ -23,7 +23,9 @@ set(FATFS_SOURCES
     ${FATFS_DIR}/ff15/source/ffunicode.c
     ${FATFS_DIR}/ff15/source/ffsystem.c
     ${FATFS_DIR}/sd_driver/sd_spi.c
-    ${FATFS_DIR}/sd_driver/spi.c
+    # sd_driver/spi.c is added per-target: stock for picocalc/restouch, a
+    # DMA-poll patched copy (dvi/sd_spi_poll.c) for DVI — see that file. The poll
+    # driver is required on DVI (keepalive alone is much worse — tested).
     ${FATFS_DIR}/sd_driver/sd_card.c
     ${FATFS_DIR}/sd_driver/crc.c
     ${FATFS_DIR}/sd_driver/demo_logging.c
@@ -49,6 +51,7 @@ set(AUDIO_SOURCES
 add_executable(tinyagi_picocalc
     ${COMMON_SOURCES}
     ${AUDIO_SOURCES}
+    ${FATFS_DIR}/sd_driver/spi.c   # stock SD driver
     picocalc/display.c
     picocalc/kbd_input.c
     picocalc/hw_config.c
@@ -93,6 +96,7 @@ pico_add_extra_outputs(tinyagi_picocalc)
 add_executable(tinyagi_restouch
     ${COMMON_SOURCES}
     ${AUDIO_SOURCES}
+    ${FATFS_DIR}/sd_driver/spi.c   # stock SD driver
     restouch/display.c
     restouch/lcdspi.c
     restouch/kbd_input.c
@@ -158,6 +162,7 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/pico_lib/dvi/CMakeLists.txt)
     add_executable(tinyagi_dvi
         ${COMMON_SOURCES}
         ${AUDIO_SOURCES}
+        dvi/sd_spi_poll.c   # DMA-poll SD driver (replaces stock spi.c) — required on DVI
         dvi/display.cpp
         dvi/kbd_input.c
         dvi/hw_config.c
@@ -177,8 +182,9 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/pico_lib/dvi/CMakeLists.txt)
         DVI_TARGET=1                   # enables DVI-only debug hooks in shared main.c
         DVI_ENABLE_CDC=0               # 1 = USB-C serial console; 0 = UART-only (crash isolation test)
         DVI_KEEPALIVE_TIMER=1          # workaround for lost-wakeup room-transition hang (confirmed)
-        SOUND_ENABLED=0                # audio off by default (HDMI audio glitches audio-decoding monitors)
-        DVI_HDMI_AUDIO=0               # 1 = HDMI data-island audio (impl works; see CLAUDE.md open issue)
+        DVI_DOUBLE_BUFFER=1            # 1 = core1 scans a front buffer (no black flash during loads); 0 = live scan
+        SOUND_ENABLED=1                # audio ON (HDMI data-island); may glitch audio-decoding monitors
+        DVI_HDMI_AUDIO=1               # 1 = HDMI data-island audio (impl works; see CLAUDE.md open issue)
         KB_ENTER_CODE=0x0D
         KB_F10_CODE=0x8A
         SYS_CLOCK_KHZ=252000          # 21 x 12 MHz — PIO-USB constraint

@@ -1,0 +1,246 @@
+diff --git a/agi/src/heap.c b/agi/src/heap.c
+index 1ac96e7..cc708e0 100644
+--- a/agi/src/heap.c
++++ b/agi/src/heap.c
+@@ -1,4 +1,5 @@
+ #include "heap.h"
++#include "vol.h"
+ #include "platform_support.h"
+ #include "state.h"
+ #include "decryption.h"
+@@ -73,6 +74,10 @@ void heap_reset() {
+ // Full reset for game switching: frees everything including logic 0,
+ // forces reload of all game-specific files on next new_room().
+ void heap_full_reset(void) {
++	// Drop cached dir files so the next game reloads its own (they are keyed by
++	// bare filename, which is identical across games — the game_dir differs).
++	vol_cache_reset();
++
+ 	for (size_t i = 0; i < 256; i++) {
+ 		discard_vol_data(&heap_data.loaded_logics[i]);
+ 		discard_vol_data(&heap_data.loaded_pics[i]);
+diff --git a/agi/src/platform_support.h b/agi/src/platform_support.h
+index 23d441e..435410e 100644
+--- a/agi/src/platform_support.h
++++ b/agi/src/platform_support.h
+@@ -17,6 +17,14 @@ extern void free_file(agi_file_t file);
+ // Read len bytes from filename starting at byte offset (avoids loading whole VOL files).
+ extern size_t read_file_at(const char* filename, size_t offset, uint8_t* buf, size_t len);
+ 
++// Persistent file handle: open once, read several ranges, close. Avoids paying
++// the f_open + FAT-walk cost per read when multiple ranges come from one file
++// (e.g. a resource's size header + its data, both in the same VOL file).
++typedef struct agi_fh agi_fh_t;
++extern agi_fh_t* file_open(const char* filename);                         // NULL on failure
++extern size_t    file_read_at(agi_fh_t* fh, size_t offset, void* buf, size_t len);
++extern void      file_close(agi_fh_t* fh);
++
+ extern void screen_set_160(int x, int y, int color);
+ extern void screen_set_320(int x, int y, int color);
+ extern int priority_get(int x, int y);
+diff --git a/agi/src/vol.c b/agi/src/vol.c
+index 7066c16..ac6875b 100644
+--- a/agi/src/vol.c
++++ b/agi/src/vol.c
+@@ -10,13 +10,61 @@ typedef struct {
+ 	uint32_t offset;
+ } resPos_t;
+ 
++/* Directory-file cache.
++ * AGI resolves every resource load by reading a whole dir file (logdir / picdir
++ * / viewdir / snddir) just to fetch a 3-byte entry, then discarding it — so a
++ * single room load re-reads the same small dir file many times from the SD card.
++ * The dir files are few (4) and static for a given game, so cache them in RAM:
++ * each is read from SD at most once per game.  This slashes per-transition SD
++ * traffic, which on the RP2350 DVI target is critical — core0 SD activity was
++ * starving core1's real-time DVI feed and dropping the video signal.
++ * The cache is reset on game switch (vol_cache_reset(), called by heap_full_reset). */
++#define DIR_CACHE_N 4
++static struct {
++	char       name[16];
++	agi_file_t file;      /* file.data == NULL => empty slot */
++} dir_cache[DIR_CACHE_N];
++
++static agi_file_t _get_dir_cached(const char* dir_filename) {
++	for (int i = 0; i < DIR_CACHE_N; i++) {
++		if (dir_cache[i].file.data && strcmp(dir_cache[i].name, dir_filename) == 0) {
++			return dir_cache[i].file;
++		}
++	}
++	/* miss: read from SD and store in a free slot (do NOT free — it stays cached) */
++	agi_file_t f = get_file(dir_filename);
++	if (f.data) {
++		for (int i = 0; i < DIR_CACHE_N; i++) {
++			if (!dir_cache[i].file.data) {
++				strncpy(dir_cache[i].name, dir_filename, sizeof(dir_cache[i].name) - 1);
++				dir_cache[i].name[sizeof(dir_cache[i].name) - 1] = '\0';
++				dir_cache[i].file = f;
++				break;
++			}
++		}
++		/* With only 4 distinct dir files and DIR_CACHE_N == 4 a slot always
++		 * exists; if it somehow didn't, f is returned uncached (small leak). */
++	}
++	return f;
++}
++
++void vol_cache_reset(void) {
++	for (int i = 0; i < DIR_CACHE_N; i++) {
++		if (dir_cache[i].file.data) {
++			free_file(dir_cache[i].file);
++			dir_cache[i].file.data = NULL;
++			dir_cache[i].file.size = 0;
++			dir_cache[i].name[0] = '\0';
++		}
++	}
++}
++
+ resPos_t _find_res_offset(const char* dir_filename, const uint8_t res_no) {
+-	agi_file_t dir_file = get_file(dir_filename);
++	agi_file_t dir_file = _get_dir_cached(dir_filename);   /* cached — must NOT free */
+ 
+ 	unsigned int offset = res_no * 3;
+ 
+-	if (offset >= dir_file.size) {
+-		free_file(dir_file);
++	if (!dir_file.data || offset >= dir_file.size) {
+ 		panic("Directory file offset out of bounds for file '%s', resource no %d", dir_filename, res_no);
+ 	}
+ 
+@@ -24,8 +72,6 @@ resPos_t _find_res_offset(const char* dir_filename, const uint8_t res_no) {
+ 	uint8_t b = *(dir_file.data + offset + 1);
+ 	uint8_t c = *(dir_file.data + offset + 2);
+ 
+-	free_file(dir_file);
+-
+ 	uint32_t entry = (a << 16) | (b << 8) | c;
+ 	return (resPos_t) { .vol_number = a >> 4, .offset = entry & 0xFFFFF };
+ }
+@@ -37,20 +83,28 @@ vol_data_t load_vol_data(const char* dir_filename, const uint8_t res_no, bool is
+ 	char path[8];
+ 	sprintf(path, "vol.%d", res_pos.vol_number);
+ 
+-	// Read only the 2-byte size header from the VOL file instead of loading it all.
++	// Open the VOL file once and read both the 2-byte size header and the data
++	// from the same handle — avoids a second f_open + FAT-walk per resource.
++	agi_fh_t* fh = file_open(path);
++	if (!fh) {
++		panic("Failed to open VOL file '%s'", path);
++	}
++
+ 	uint8_t size_buf[2];
+-	read_file_at(path, res_pos.offset + 3, size_buf, 2);
++	file_read_at(fh, res_pos.offset + 3, size_buf, 2);
+ 
+ 	vol_data_t result;
+ 	result.size = size_buf[0] | (size_buf[1] << 8);
+ 
+ 	result.buffer = malloc(result.size + (is_logic ? 1 : 0));
+ 	if (result.buffer) {
+-		read_file_at(path, res_pos.offset + 5, result.buffer, result.size);
++		file_read_at(fh, res_pos.offset + 5, result.buffer, result.size);
+ 	} else {
++		file_close(fh);
+ 		panic("Failed to allocate memory for resource");
+ 	}
+ 
++	file_close(fh);
+ 	return result;
+ }
+ 
+diff --git a/agi/src/vol.h b/agi/src/vol.h
+index d885981..90824cd 100644
+--- a/agi/src/vol.h
++++ b/agi/src/vol.h
+@@ -9,4 +9,8 @@ typedef struct {
+ } vol_data_t;
+ 
+ vol_data_t load_vol_data(const char* dir_filename, const uint8_t res_no, bool is_logic);
+-bool discard_vol_data(vol_data_t* vol_data);
+\ No newline at end of file
++bool discard_vol_data(vol_data_t* vol_data);
++
++// Free the cached dir files (logdir/picdir/viewdir/snddir). Call on game switch
++// so the next game reloads its own dir files. See dir_cache in vol.c.
++void vol_cache_reset(void);
+\ No newline at end of file
+diff --git a/tinyagi-rp2350/platform.c b/tinyagi-rp2350/platform.c
+index a98043e..b492668 100644
+--- a/tinyagi-rp2350/platform.c
++++ b/tinyagi-rp2350/platform.c
+@@ -41,6 +41,20 @@ size_t read_file_at(const char *filename, size_t offset, uint8_t *buf, size_t le
+     return sd_read_file_at(path, offset, buf, len);
+ }
+ 
++agi_fh_t *file_open(const char *filename) {
++    char path[96];
++    snprintf(path, sizeof(path), "%s/%s", game_dir, filename);
++    return (agi_fh_t *)sd_file_open(path);
++}
++
++size_t file_read_at(agi_fh_t *fh, size_t offset, void *buf, size_t len) {
++    return sd_file_read_at((void *)fh, offset, buf, len);
++}
++
++void file_close(agi_fh_t *fh) {
++    sd_file_close((void *)fh);
++}
++
+ // -----------------------------------------------------------------------
+ // Save / restore
+ // -----------------------------------------------------------------------
+diff --git a/tinyagi-rp2350/sdcard.c b/tinyagi-rp2350/sdcard.c
+index 4d640fc..d6fac43 100644
+--- a/tinyagi-rp2350/sdcard.c
++++ b/tinyagi-rp2350/sdcard.c
+@@ -120,6 +120,32 @@ size_t sd_read_file_at(const char *path, size_t offset, void *buf, size_t len)
+     return (size_t)br;
+ }
+ 
++void *sd_file_open(const char *path)
++{
++    FIL *fil = malloc(sizeof(FIL));
++    if (!fil) return NULL;
++    if (f_open(fil, path, FA_READ) != FR_OK) { free(fil); return NULL; }
++    return fil;
++}
++
++size_t sd_file_read_at(void *handle, size_t offset, void *buf, size_t len)
++{
++    if (!handle) return 0;
++    FIL *fil = (FIL *)handle;
++    f_lseek(fil, (FSIZE_t)offset);   // seeking to the current position is a cheap no-op
++    UINT br = 0;
++    f_read(fil, buf, (UINT)len, &br);
++    return (size_t)br;
++}
++
++void sd_file_close(void *handle)
++{
++    if (!handle) return;
++    FIL *fil = (FIL *)handle;
++    f_close(fil);
++    free(fil);
++}
++
+ static FIL save_fil;
+ static bool save_is_open = false;
+ 
+diff --git a/tinyagi-rp2350/sdcard.h b/tinyagi-rp2350/sdcard.h
+index 3c7f052..99b084f 100644
+--- a/tinyagi-rp2350/sdcard.h
++++ b/tinyagi-rp2350/sdcard.h
+@@ -19,6 +19,13 @@ void sd_free_file(uint8_t *buf);
+ // Read len bytes from path starting at byte offset. Returns bytes actually read.
+ size_t sd_read_file_at(const char *path, size_t offset, void *buf, size_t len);
+ 
++// Persistent handle: open a file once, read multiple ranges, close — avoids the
++// per-read f_open + FAT-walk overhead when several ranges come from one file
++// (e.g. a resource's size header + data both live in the same VOL file).
++void  *sd_file_open(const char *path);                                  // NULL on failure
++size_t sd_file_read_at(void *handle, size_t offset, void *buf, size_t len);
++void   sd_file_close(void *handle);
++
+ // Sequential FatFS file I/O for AGI save/restore data.
+ // sd_save_open: path is the full FatFS path; write=true creates/overwrites.
+ bool sd_save_open(const char *path, bool write);

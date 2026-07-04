@@ -29,7 +29,6 @@
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
 #include "hardware/dma.h"
-#include "hardware/structs/bus_ctrl.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -56,6 +55,24 @@ static const uint16_t agi_palette555[16] = {
 
 static uint8_t framebuffer[320 * 200];
 static uint8_t priority_buffer[160 * 168];
+
+/* DVI_DOUBLE_BUFFER: core1 scans a dedicated front buffer instead of the live
+ * framebuffer; flush_display() copies the composed framebuffer into it once per
+ * game cycle.  This holds the previous frame on screen through a room load
+ * (which blanks the framebuffer via text_screen()/clear_lines) instead of
+ * showing the black intermediate — matches PicoCalc's hold-display behaviour,
+ * and removes most tearing.  Costs +64 KB SRAM.  SCAN_BUF is whatever core1
+ * scans (and what the chooser/Loading UI draws to), so single-buffer behaviour
+ * is byte-identical to before. */
+#ifndef DVI_DOUBLE_BUFFER
+#define DVI_DOUBLE_BUFFER 1
+#endif
+#if DVI_DOUBLE_BUFFER
+static uint8_t scanout_buffer[320 * 200];
+#define SCAN_BUF scanout_buffer
+#else
+#define SCAN_BUF framebuffer
+#endif
 
 #define DVI_H       240
 #define DVI_W       640
@@ -161,7 +178,7 @@ static void __not_in_flash_func(core1_dvi_loop)(void) {
             uint16_t *dst = lb->data();
             int agi_y = y - V_MARGIN;
             if (agi_y >= 0 && agi_y < 200) {
-                const uint8_t *src = &framebuffer[agi_y * 320];
+                const uint8_t *src = &SCAN_BUF[agi_y * 320];
                 for (int x = 0; x < 320; x++)
                     dst[x] = agi_palette555[src[x] & 0x0F];
                 memset(dst + 320, 0, (DVI_W - 320) * sizeof(uint16_t));
@@ -228,15 +245,11 @@ extern "C" uint8_t font_data[2048];  /* defined in platform.c; 256 glyphs x 8 ro
 /* display.h declares these as extern "C" via its __cplusplus guards. */
 
 void display_init(void) {
-    /* Give DMA priority over the cores on the bus arbiter.  pico_lib doesn't do
-     * this; without it the DVI scan-out DMA can be starved by core-side SRAM
-     * traffic (e.g. the HDMI-audio producer) → TMDS underrun → the monitor
-     * loses sync (black, ~10 s to re-lock).  pico-infonesPlus sets the same. */
-    bus_ctrl_hw->priority = BUSCTRL_BUS_PRIORITY_DMA_W_BITS |
-                            BUSCTRL_BUS_PRIORITY_DMA_R_BITS;
-
     memset(framebuffer,     0, sizeof(framebuffer));
     memset(priority_buffer, 0, sizeof(priority_buffer));
+#if DVI_DOUBLE_BUFFER
+    memset(scanout_buffer,  0, sizeof(scanout_buffer));  /* no garbage before first flush */
+#endif
     dvi_inst = new dvi::DVI(pio0, &dvi_cfg, dvi::getTiming640x480p60Hz());
     multicore_launch_core1_with_stack(core1_dvi_loop, core1_stack,
                                       sizeof(core1_stack));
@@ -283,8 +296,13 @@ extern "C" void dvi_audio_write(const int16_t *mono, int n) {
 #endif /* DVI_HDMI_AUDIO */
 
 void flush_display(void) {
-    /* DVI scanout is continuous from core1 — framebuffer changes are
-       visible on the next scan without an explicit flush. */
+#if DVI_DOUBLE_BUFFER
+    /* Publish the composed frame to the buffer core1 scans, so only completed
+       frames are shown (no black flash mid room-load). Called once per cycle. */
+    memcpy(scanout_buffer, framebuffer, sizeof(framebuffer));
+#else
+    /* Single-buffer: no-op — core1 scans the live framebuffer directly. */
+#endif
 }
 
 void screen_set_160(int x, int y, int color) {
@@ -325,7 +343,9 @@ static void lcd_putchar(char c) {  /* internal helper — not part of public API
         int fy = base_y + row;
         if (fy >= 200) break;
         uint8_t bits = glyph[row];
-        uint8_t *line = &framebuffer[fy * 320 + base_x];
+        /* Draw straight to the scanned buffer — the pre-game chooser/Loading UI
+           has no compose+flush cycle behind it. */
+        uint8_t *line = &SCAN_BUF[fy * 320 + base_x];
         for (int col = 0; col < 8; col++)
             line[col] = (bits & (0x80u >> col)) ? 15 : 0;
     }
@@ -333,7 +353,7 @@ static void lcd_putchar(char c) {  /* internal helper — not part of public API
 }
 
 extern "C" void lcd_clear(void) {
-    memset(framebuffer, 0, sizeof(framebuffer));
+    memset(SCAN_BUF, 0, sizeof(framebuffer));
     text_col = 0;
     text_row = 0;
 }
