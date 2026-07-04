@@ -29,6 +29,7 @@
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
 #include "hardware/dma.h"
+#include "hardware/sync.h"   // save_and_disable_interrupts (flash-write pause)
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -169,10 +170,26 @@ static const dvi::Config dvi_cfg = {
     .invert   = false,
 };
 
+// Cooperative pause so core0 can write flash (erase/program disables XIP) without
+// core1 executing/reading flash. Set true once core1's scanout is up.
+static volatile bool core1_lockout_ready = false;
+static volatile bool dvi_pause_req = false;   // core0 -> core1: park yourself
+static volatile bool dvi_paused    = false;   // core1 -> core0: parked, safe to write
+
 static void __not_in_flash_func(core1_dvi_loop)(void) {
     dvi_inst->registerIRQThisCore();
     dvi_inst->start();
+    core1_lockout_ready = true;
     while (true) {
+        if (dvi_pause_req) {
+            dvi_inst->stop();                       // clean DMA/serialiser halt (XIP still on here)
+            uint32_t ints = save_and_disable_interrupts();
+            dvi_paused = true;
+            while (dvi_pause_req) tight_loop_contents();  // RAM-only spin during the flash write
+            dvi_paused = false;
+            restore_interrupts(ints);
+            dvi_inst->start();                      // clean restart; monitor re-syncs
+        }
         for (int y = 0; y < DVI_H; y++) {
             dvi::DVI::LineBuffer *lb = dvi_inst->getLineBuffer();
             uint16_t *dst = lb->data();
@@ -190,6 +207,21 @@ static void __not_in_flash_func(core1_dvi_loop)(void) {
         }
         dvi_loop_frames++;   /* one full frame fed to the encoder */
     }
+}
+
+// flashfs flash-write critical section (overrides the weak no-ops in flashfs.c):
+// pause core1's scanout so it isn't executing/reading flash while XIP is disabled
+// for an erase/program. The DVI signal drops for the duration (fine for the rare,
+// one-time caching / save writes). Waits until core1 has registered as a victim.
+extern "C" void flashfs_write_lock(void) {
+    if (!core1_lockout_ready) return;             // core1 not started -> single-core, no pause
+    dvi_pause_req = true;
+    while (!dvi_paused) tight_loop_contents();    // wait for core1 to park (<= ~1 frame)
+}
+extern "C" void flashfs_write_unlock(void) {
+    if (!core1_lockout_ready) return;
+    dvi_pause_req = false;
+    while (dvi_paused) tight_loop_contents();      // wait for core1 to resume
 }
 
 /* Core0-callable liveness probes.

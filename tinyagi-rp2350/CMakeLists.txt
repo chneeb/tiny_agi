@@ -8,6 +8,9 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 pico_sdk_init()
 
+# littlefs (flash game/save cache) — shared by all targets
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/littlefs)
+
 # ── External libraries (PicoCalc hardware modules) ───────────────────────────
 set(PICOCALC_HW ${CMAKE_CURRENT_SOURCE_DIR}/../../PicoCalc/Code/picocalc_helloworld)
 add_subdirectory(${PICOCALC_HW}/i2ckbd ${CMAKE_CURRENT_BINARY_DIR}/i2ckbd)
@@ -39,6 +42,9 @@ set(COMMON_SOURCES
     main.c
     platform.c
     sdcard.c
+    flashfs.c
+    littlefs/lfs.c
+    littlefs/lfs_util.c
     ${FATFS_SOURCES}
 )
 
@@ -72,6 +78,7 @@ target_compile_definitions(tinyagi_picocalc PRIVATE
     SYS_CLOCK_KHZ=133000
     USE_VREG_BOOST=0
     AUDIO_PIN=26
+    FLASHFS_ENABLED=0             # play directly from SD (no flash cache)
 )
 
 target_link_libraries(tinyagi_picocalc
@@ -84,6 +91,7 @@ target_link_libraries(tinyagi_picocalc
     hardware_i2c
     hardware_pwm
     hardware_irq
+    hardware_flash
     i2ckbd
     lcdspi
 )
@@ -115,6 +123,7 @@ target_compile_definitions(tinyagi_restouch PRIVATE
     SOUND_ENABLED=0
     KB_ENTER_CODE=0x0D
     KB_F10_CODE=0x8A
+    FLASHFS_ENABLED=1             # flash game/save cache (faster loads, SD-optional)
     SYS_CLOCK_KHZ=300000
     USE_VREG_BOOST=1
     # ST7789 LCD on spi1
@@ -146,6 +155,7 @@ target_link_libraries(tinyagi_restouch
     hardware_dma
     hardware_pwm
     hardware_irq
+    hardware_flash
 )
 
 pico_enable_stdio_usb(tinyagi_restouch 1)
@@ -189,6 +199,7 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/pico_lib/dvi/CMakeLists.txt)
         KB_F10_CODE=0x8A
         SYS_CLOCK_KHZ=252000          # 21 x 12 MHz — PIO-USB constraint
         USE_VREG_BOOST=1
+        PICO_FLASH_SIZE_BYTES=16777216 # 16 MB on the RP2350-PiZero (pico2 default is 4 MB)
         PICO_PIO_USE_GPIO_BASE=1       # DVI uses GPIO 32-39 (RP2350B extended range)
         PICO_DEFAULT_PIO_USB_DP_PIN=28 # PIO-USB D+ on GPIO 28
         PICO_STACK_SIZE=4096
@@ -208,6 +219,7 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/pico_lib/dvi/CMakeLists.txt)
         hardware_pwm
         hardware_irq
         hardware_interp
+        hardware_flash
         dvi
         util
         tinyusb_device

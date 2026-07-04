@@ -8,19 +8,54 @@
 #include "display.h"
 #include "kbd_input.h"
 #include "sdcard.h"
+#include "flashfs.h"
 #if SOUND_ENABLED
 #include "agi_sound_player/agi_sound.h"
 #endif
 
 // -----------------------------------------------------------------------
-// Game directory set by main() after the dir chooser runs.
+// Game location set by main() after the chooser runs.
+//   game_dir  = SD path, e.g. "0:/agi/SQ1" (used to cache from SD + SD saves)
+//   game_name = bare name, e.g. "SQ1"      (used for the flash cache path)
+//   play_from_flash = serve game files from the flash cache instead of SD
 // -----------------------------------------------------------------------
 char game_dir[64];
+char game_name[32];
+bool play_from_flash = false;
+bool sd_available = false;   // set by main() from sd_card_init()
+bool game_on_sd = false;     // is the selected game present on SD? (saves -> SD only if so)
+
+// DVI_EMBED_GAME: serve game files from the flash archive at 0x10100000 instead
+// of the SD card (test to isolate the transition signal blanking). get_file
+// copies out of flash into a malloc'd buffer so free_file/heap free() still work.
+#ifndef DVI_EMBED_GAME
+#define DVI_EMBED_GAME 0
+#endif
+#if DVI_EMBED_GAME
+#include "embedded_archive.h"
+#endif
 
 // -----------------------------------------------------------------------
 // File I/O
 // -----------------------------------------------------------------------
 agi_file_t get_file(const char *filename) {
+#if DVI_EMBED_GAME
+    const fileentry_t *e = embed_find(filename);
+    if (e) {
+        uint8_t *data = malloc(e->length);
+        if (data) memcpy(data, embed_ptr(e), e->length);
+        agi_file_t f = { .data = data, .size = e->length };
+        return f;
+    }
+#endif
+    if (play_from_flash) {
+        size_t sz = 0;
+        uint8_t *data = flashfs_read_file(game_name, filename, &sz);
+        if (!data)
+            printf("flashfs FAIL: %s/%s\n", game_name, filename);
+        agi_file_t f = { .data = data, .size = sz };
+        return f;
+    }
     char path[96];
     snprintf(path, sizeof(path), "%s/%s", game_dir, filename);
     size_t sz = 0;
@@ -36,6 +71,18 @@ void free_file(agi_file_t file) {
 }
 
 size_t read_file_at(const char *filename, size_t offset, uint8_t *buf, size_t len) {
+#if DVI_EMBED_GAME
+    const fileentry_t *e = embed_find(filename);
+    if (e) {
+        if (offset >= e->length) return 0;
+        size_t n = len;
+        if (offset + n > e->length) n = e->length - offset;
+        memcpy(buf, embed_ptr(e) + offset, n);
+        return n;
+    }
+#endif
+    if (play_from_flash)
+        return flashfs_read_at(game_name, filename, offset, buf, len);
     char path[96];
     snprintf(path, sizeof(path), "%s/%s", game_dir, filename);
     return sd_read_file_at(path, offset, buf, len);
@@ -44,27 +91,39 @@ size_t read_file_at(const char *filename, size_t offset, uint8_t *buf, size_t le
 // -----------------------------------------------------------------------
 // Save / restore
 // -----------------------------------------------------------------------
+// Saves prefer the SD card when present; otherwise they go to the flash cache
+// (/saves/<game>.sav) so SD-less play can still save.
+static bool save_uses_flash = false;
+
 agi_save_data_file_ptr agi_save_data_open(const char *mode) {
-    char path[96];
-    snprintf(path, sizeof(path), "%s/agi_save.dat", game_dir);
     bool write = (mode[0] == 'w');
-    sd_save_open(path, write);
+    save_uses_flash = !(sd_available && game_on_sd);   // SD only if card present AND game is on it
+    if (save_uses_flash) {
+        flashfs_save_open(game_name, write);
+    } else {
+        char path[96];
+        snprintf(path, sizeof(path), "%s/agi_save.dat", game_dir);
+        sd_save_open(path, write);
+    }
     return (agi_save_data_file_ptr)1;
 }
 
 void agi_save_data_write(agi_save_data_file_ptr file_ptr, void *data, size_t size) {
     (void)file_ptr;
-    sd_save_write(data, size);
+    if (save_uses_flash) flashfs_save_write(data, size);
+    else                 sd_save_write(data, size);
 }
 
 void agi_save_data_read(agi_save_data_file_ptr file_ptr, void *destination, size_t size) {
     (void)file_ptr;
-    sd_save_read(destination, size);
+    if (save_uses_flash) flashfs_save_read(destination, size);
+    else                 sd_save_read(destination, size);
 }
 
 void agi_save_data_close(agi_save_data_file_ptr file_ptr) {
     (void)file_ptr;
-    sd_save_close();
+    if (save_uses_flash) flashfs_save_close();
+    else                 sd_save_close();
 }
 
 // -----------------------------------------------------------------------

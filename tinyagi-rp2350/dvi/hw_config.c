@@ -9,7 +9,7 @@ static spi_t spis[] = {
         .miso_gpio   = 40,
         .mosi_gpio   = 31,
         .sck_gpio    = 30,
-        .baud_rate   = 12500 * 1000,
+        .baud_rate   = 40000 * 1000,   /* overclocked from 12.5 MHz (card-dependent); speeds caching */
         .DMA_IRQ_num = DMA_IRQ_1,  /* DVI owns DMA_IRQ_0 on core1; SD uses DMA_IRQ_1 on core0 */
     }
 };

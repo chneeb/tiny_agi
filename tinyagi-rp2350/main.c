@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <malloc.h>
+#include <string.h>
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
 #if USE_VREG_BOOST
@@ -13,10 +14,29 @@
 #include "display.h"
 #include "kbd_input.h"
 #include "sdcard.h"
+#include "flashfs.h"
 #include "lcdspi.h"
 #include "agi.h"
 
+/* DVI_EMBED_GAME: serve all game files from a flash archive (0x10100000) instead
+ * of the SD card — a test to isolate whether SD access causes the transition
+ * signal blanking. See dvi/embedded_archive.h + platform.c. */
+#ifndef DVI_EMBED_GAME
+#define DVI_EMBED_GAME 0
+#endif
+
+// FLASHFS_ENABLED: cache games to flash and play from there (fixes the DVI
+// transition blanking; SD-optional). 0 = play directly from SD (pre-flashfs
+// behavior; SD required). Default on.
+#ifndef FLASHFS_ENABLED
+#define FLASHFS_ENABLED 1
+#endif
+
 extern char game_dir[64];
+extern char game_name[32];
+extern bool play_from_flash;
+extern bool sd_available;
+extern bool game_on_sd;
 
 #if DVI_TARGET
 #include "pico/time.h"
@@ -127,14 +147,34 @@ int main(void) {
 #if DVI_TARGET
     cdc_stdio_init(); /* USB-C → serial terminal for printf debug output */
 #endif
+
+    // Mount the flash game/save cache BEFORE core1 (the DVI scanout) starts, so
+    // the format-on-first-boot write is single-core (no cross-core coordination).
+#if FLASHFS_ENABLED
+    flashfs_init();
+#endif
+
     display_init();
 
     lcd_clear();
+#if DVI_EMBED_GAME
+    lcd_print_string("Embedded game (flash archive)\n");   /* SD not used */
+#else
     lcd_print_string("Mounting SD card...\n");
-    if (!sd_card_init()) {
+    sd_available = sd_card_init();
+#if FLASHFS_ENABLED
+    // SD is optional: without it, only flash-cached games are playable.
+    if (!sd_available)
+        lcd_print_string("No SD card - flash games only.\n");
+    sleep_ms(400);
+#else
+    // No flash cache: SD is required (games play directly from it).
+    if (!sd_available) {
         lcd_print_string("SD mount FAILED!\n");
         while (1) tight_loop_contents();
     }
+#endif
+#endif
 
 #if SOUND_ENABLED
 #if DVI_HDMI_AUDIO
@@ -156,15 +196,47 @@ int main(void) {
 #endif
 
     while (1) {
-        if (!show_dir_chooser(game_dir, sizeof(game_dir))) {
+#if !DVI_EMBED_GAME
+        game_choice_t choice;
+        if (!show_dir_chooser(&choice)) {
             lcd_clear();
             lcd_print_string("No game selected.\n");
             while (1) tight_loop_contents();
         }
+        strncpy(game_name, choice.name, sizeof(game_name) - 1);
+        game_name[sizeof(game_name) - 1] = '\0';
+        game_on_sd = choice.on_sd;
+        snprintf(game_dir, sizeof(game_dir), "0:/agi/%s", game_name);
+
+#if FLASHFS_ENABLED
+        // Cache from SD on first play (or re-cache on R), then always play from
+        // flash — that's what keeps transitions fast (no SD during play). The copy
+        // stops core1, so on DVI the screen goes dark and can't show progress;
+        // set expectations here, while it's still visible.
+        if (choice.refresh || !choice.in_flash) {
+            lcd_clear();
+            lcd_print_string(choice.refresh ? "Refreshing from SD\n\n"
+                                            : "First-time setup\n\n");
+            lcd_print_string("Copying ");
+            lcd_print_string(game_name);
+            lcd_print_string(" to flash.\n\n");
+            lcd_print_string("The screen will go DARK for\n");
+            lcd_print_string("a bit. Please wait and do\n");
+            lcd_print_string("not unplug the device...\n");
+            sleep_ms(2500);   // let the message be read before core1 stops
+            flashfs_cache_game(game_name, game_dir);
+        }
+        play_from_flash = true;   // FLASHFS off -> stays false -> get_file reads SD
+#endif  /* FLASHFS_ENABLED */
+#endif  /* !DVI_EMBED_GAME */
 
         lcd_clear();
         lcd_print_string("Loading: ");
-        lcd_print_string(game_dir);
+#if DVI_EMBED_GAME
+        lcd_print_string("(embedded)");
+#else
+        lcd_print_string(game_name);
+#endif
         lcd_print_string("\n");
         agi_initialize();
 

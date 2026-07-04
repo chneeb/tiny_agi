@@ -19,11 +19,13 @@ agi/                   Platform-independent AGI engine (C)
 tinyagi-rp2350/        Merged RP2350 port — PicoCalc and RESTOUCH as two CMake targets
   main.c               Shared game loop; #if SOUND_ENABLED / USE_VREG_BOOST guards
   platform.c           Shared platform callbacks; #if SOUND_ENABLED for audio path
-  sdcard.c             Shared SD/FAT file I/O; KB_ENTER_CODE define per target
+  sdcard.c             Shared SD/FAT file I/O + chooser (merges SD & flash-cached games)
+  flashfs.c/.h         Flash game/save cache on littlefs (fixes DVI blanking; FLASHFS_ENABLED)
   display.h            Shared display interface (display_init, flush_display, etc.)
   audio/               PWM synth for AGI sound (linked by both; gated by SOUND_ENABLED)
   agi_sound_player/    AGI sound decoder (linked by both; gated by SOUND_ENABLED)
   fatfs/               FatFs_SPI submodule (shared)
+  littlefs/            littlefs (vendored) — backs the flash game/save cache (shared)
   picocalc/            PicoCalc-specific hardware
     display.c          320×200 framebuffer → ILI9488 TFT (320×320, y-offset 60); RGB888
     kbd_input.*        PicoCalc keyboard driver (ClockworkPi i2ckbd library)
@@ -76,6 +78,13 @@ submodule isn't checked out, only picocalc/restouch build.
 | `KB_F10_CODE` | 0x90 | 0x8A | 0x8A |
 | `SYS_CLOCK_KHZ` | 133000 | 300000 | 252000 (21×12 MHz, PIO-USB) |
 | `USE_VREG_BOOST` | 0 | 1 | 1 |
+| `FLASHFS_ENABLED` | 0 (SD-direct) | 1 | 1 (default) |
+| `PICO_FLASH_SIZE_BYTES` | 4 MB (default) | 4 MB (default) | 16 MB (override) |
+
+`FLASHFS_ENABLED` (default 1) turns on the flash game/save cache (see "Flash game/save
+cache" below). `=0` reverts to playing directly from SD (SD required). picocalc ships with
+it **off** (plays from SD), restouch/DVI **on**. DVI overrides `PICO_FLASH_SIZE_BYTES` to
+16 MB (the RP2350-PiZero's real size; pico2 default is 4 MB) so littlefs uses the full region.
 
 DVI-only flags (current defaults): `DVI_TARGET=1` (guards DVI code in shared main.c),
 `DVI_ENABLE_CDC=0` (1 = USB-C serial console; 0 = UART-only),
@@ -251,8 +260,45 @@ this does **not** fix the room-transition *signal blanking* — that's a separat
 - `priority_buffer[160 * 168]` — 1 byte per cell.
 - All four pixel/priority functions have `(unsigned)x >= W || (unsigned)y >= H` guards.
 
+### Flash game/save cache (littlefs) — `flashfs.c`, `FLASHFS_ENABLED`
+The DVI room-transition **signal blanking was root-caused to SD being slow**: a room load
+spends ~300 ms in core0 SD I/O, starving core1's software-TMDS fill loop long enough that the
+monitor drops sync. **Fix: cache the game into the RP2350's spare flash and play from there**
+(XIP reads are ~instant, so core1 is never starved). This was proven first with a fixed flash
+archive (`DVI_EMBED_GAME`, kept as a guarded single-game test path) and then productised as a
+**littlefs cache** shared by all targets.
+- **Flash layout** (offset from `0x10000000`): `0x000000..0x100000` firmware (1 MB reserved),
+  `0x100000..end` littlefs (`FLASHFS_SIZE = PICO_FLASH_SIZE_BYTES - 1 MB`; 15 MB on DVI, 3 MB
+  on the 4 MB LCD boards). Block device: reads = XIP `memcpy`, prog/erase = `flash_range_*`.
+- **On selecting a game**: if not already cached, copy `SD:/agi/<name>/*` → `/games/<name>/*`
+  (streaming, lowercasing filenames to the engine's bare lowercase names); then always play
+  from flash. Second play skips the copy. `get_file`/`read_file_at` route to `flashfs_read_*`
+  when `play_from_flash` (else SD). Files stored under `/games/<name>/`, saves under `/saves/`.
+- **Chooser merges SD ∪ cached** games with tags `[SD]` / `[flash]` / `[SD+flash]`; **`R`**
+  force-re-caches an SD game. SD is now **optional** — cached games play with no card inserted.
+- **Saves**: SD when the game is on SD and a card is present (`sd_available && game_on_sd`),
+  else littlefs `/saves/<name>.sav` — so SD-less play can still save (separate slot from SD).
+- **Flash-write vs the DVI (critical)**: flash erase/program disables XIP, so no core may
+  execute/read flash during a write. `multicore_lockout` **deadlocks** against core1's real-time
+  loop — do NOT use it. Instead: (a) the format-on-first-boot runs in `flashfs_init()` **before
+  core1 is launched** (single-core, `flashfs_write_lock` is a no-op then); (b) caching/saves
+  that happen while core1 runs use a **cooperative pause** — `flashfs_write_lock` sets a flag,
+  core1 (in `display.cpp`) calls `dvi_inst->stop()`, disables IRQs, spins in a RAM-only loop
+  during the write, then `dvi_inst->start()` (clean DMA restart; the monitor re-syncs). So the
+  screen goes dark during caching — a clear "First-time setup… screen will go DARK" message is
+  shown *before* the pause (core1 can't draw during it). LCD targets are single-core so
+  `flashfs_write_lock` is the weak no-op there; only per-op `save_and_disable_interrupts` (in the
+  block device) is needed.
+- **littlefs geometry**: `block_size = 4096` (flash sector), `prog/read_size = 256`, static
+  read/prog/lookahead + per-file caches (one lfs file open at a time; game reads and the save
+  file use separate cache buffers).
+- SD baud on DVI is overclocked to **40 MHz** (`dvi/hw_config.c`, effective ~31.5 MHz) to speed
+  up the caching copy — card-dependent; drop to 12.5/25 MHz if a card errors.
+
 ### Game directory selection
-`show_dir_chooser()` in sdcard.c scans the SD root for directories and presents a list on the LCD. The selected path is stored in `game_dir[64]` (platform.c / main.c extern).
+`show_dir_chooser()` in sdcard.c lists games from SD (`/agi/*`) **and** the flash cache, merged
+and tagged; ENTER fills a `game_choice_t` (name + on_sd/in_flash/refresh). See "Flash game/save
+cache". With `FLASHFS_ENABLED=0` it degrades to SD-only (flashfs unmounted → lists SD only).
 
 ### Game loop (main.c)
 Outer `while(1)` calls `show_dir_chooser()` then `agi_initialize()` and runs the inner game loop. When `state.game_state == STATE_QUIT` the inner loop breaks, `agi_stop_sound()` + `lcd_clear()` run, and the outer loop shows the chooser again.
@@ -351,19 +397,19 @@ Fixed by `dvi/sd_spi_poll.c` (patched-copy SD driver that polls `dma_channel_is_
 the semaphore) — see "DVI: room-transition hang" in Key design decisions. The poll driver is
 **required** (on-device A/B: much worse without it); the keep-alive is kept as a secondary belt.
 
-### DVI: room-transition *signal blanking* — OPEN (the remaining hard one)
-Distinct from the hang above. During a room load the DVI **signal drops**: the monitor goes dark
-for a few seconds (it's re-syncing after signal loss) and sometimes never recovers. Root cause:
-pico_lib generates TMDS in **software on core1's CPU** (a per-scanline fill loop with hard real-time
-deadlines), and core0's sustained transition work — mainly **pic/view decode** (heavy framebuffer
-writes) plus the per-cycle 64 KB double-buffer copy — starves that fill loop at the SRAM level → the
-TMDS feed misses its deadline → signal drops. A CPU fill loop can't be given bus priority over
-another CPU, so this can't be tuned away. **What was tried and did NOT fix it:** SD-read reduction
-(dir-file cache + single-open — cut file-opens ~3×, ruling SD *out* as the dominant cause), more
-pico_lib buffers (`N_BUFFERS` 5→16), DMA bus-priority (on and off), double-buffer on/off. **The real
-fix is HSTX** — the RP2350 hardware TMDS serializer needs no core1 fill loop, so DMA (which *can* win
-bus priority) feeds it directly and core0 can't starve it. That's a display-driver rewrite (was the
-original plan). Until then the DVI target plays but glitches on transitions.
+### DVI: room-transition *signal blanking* — FIXED (play from flash cache)
+During a room load the DVI signal used to drop (monitor dark a few seconds, sometimes never
+recovering). **Root cause: SD is slow** — a load spends ~300 ms in core0 SD I/O, which starves
+core1's software-TMDS fill loop long enough that the monitor loses sync. (The fill loop is a CPU
+loop and can't be given bus priority over another CPU, which is why buffers / bus-priority / the
+dir-cache — which only cut file *opens*, not the data-transfer time — didn't help.) **Fixed by the
+flash game/save cache**: games are copied to littlefs in flash and played from there at XIP speed,
+so core0's per-transition work drops from ~300 ms to ~10–30 ms and core1 is never starved.
+Confirmed on device: transitions are fast (just a brief red flash), no blanking. See "Flash
+game/save cache (littlefs)" in Key design decisions. (HSTX would also fix it by removing the core1
+fill loop entirely, but is unnecessary now — kept as a note if a software-TMDS-free path is ever
+wanted.) Fallback if the cache misbehaves: `FLASHFS_ENABLED=0` reverts to SD-direct (blanking
+returns).
 
 ### DVI: HDMI audio glitches audio-decoding monitors (audio ON by default)
 `DVI_HDMI_AUDIO=1`/`SOUND_ENABLED=1` (now default) play sound via HDMI data-islands, but can glitch
@@ -385,13 +431,29 @@ Implemented (`DVI_DOUBLE_BUFFER=1`, default): core1 scans a `scanout_buffer` tha
 copies the composed framebuffer into once per cycle. Removes the black-during-load flash and tearing.
 See "DVI: display model" under Key design decisions. (Does not fix the transition *signal blanking*.)
 
+### flashfs: potential improvements (not done)
+- **Keep the screen up during caching** (best UX win): instead of `dvi_inst->stop()` during the
+  copy, keep core1 running so it shows a static "Caching…" frame the whole time. Needs *everything*
+  core1 touches to be in RAM — its code already is (`__not_in_flash_func`), but the palette
+  (`agi_palette555`, currently flash rodata) must move to RAM and pico_lib's IRQ path must be
+  confirmed flash-free. Medium effort.
+- **Force-format / recovery**: a boot key-combo (e.g. hold ESC → "Reformat flash cache? Y/N")
+  calling `lfs_format`, to recover a cache corrupted by an unrelated firmware write. (Auto-format
+  already handles a corrupt *superblock*; this covers partial corruption where mount still succeeds.
+  Manual fallback today: `picotool erase --range 0x10100000 <end>` then reboot.)
+- **Atomic refresh**: `R` re-cache currently overwrites files in place (`LFS_O_TRUNC`); switch to
+  temp-dir + `lfs_rename` so a power loss mid-refresh can't corrupt the existing cached game.
+- **SD-SPI overclock beyond 40 MHz**: `dvi/hw_config.c` `.baud_rate` — only affects caching speed
+  now (gameplay is from flash); card-dependent, A/B before raising further.
+
 ### Available (not applied): dir-cache "faster loads" patch
 `tinyagi-rp2350/patches/dircache_faster_loads.patch` — an engine-level speedup (caches the 4 dir
 files in RAM + reads each resource's size-header and data in one `f_open` instead of two), cutting
-per-transition file-opens ~3×. Correctness-preserving, benefits all targets. It was written and
-tested on the DVI target while chasing the signal blanking; it did **not** fix the blanking (which
-is why SD was ruled out as the cause), so it was reverted to keep the shared engine as-tested. Kept
-as a patch to reinstate as a standalone "faster loads" commit if wanted — `git apply` from repo root.
+per-transition file-*opens* ~3×. Correctness-preserving, benefits all targets. It was written while
+chasing the signal blanking and did **not** fix it — **not** because SD was innocent (it was the
+cause; the flash cache proved that) but because it only cut file *opens*, not the resource
+*data-transfer* time that dominates a load. Superseded on DVI by the flash cache; still a valid
+standalone "faster loads" speedup for SD-direct play (e.g. picocalc) — `git apply` from repo root.
 
 ### RESTOUCH: SPI clock drops to 12.5 MHz after SD card access
 `lcdspi_init()` configures spi1 at 80 MHz. The FatFs_SPI library's `my_spi_init()` calls `spi_init(spi1, ...)` (one-time, guarded) then `spi_set_baudrate(spi1, 12.5 MHz)` on each SD access. After any SD read, spi1 is left at 12.5 MHz and all subsequent LCD operations (framebuffer flushes, startup text) run at that reduced rate. ST7789 is within spec at 12.5 MHz so rendering is correct but slower. Fix: call `spi_set_baudrate(LCD_SPI_PORT, LCD_SPI_CLOCK_HZ)` at the start of `lcdspi_set_address()`.
