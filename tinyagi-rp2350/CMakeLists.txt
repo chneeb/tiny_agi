@@ -123,7 +123,8 @@ target_compile_definitions(tinyagi_restouch PRIVATE
     SOUND_ENABLED=0
     KB_ENTER_CODE=0x0D
     KB_F10_CODE=0x8A
-    FLASHFS_ENABLED=1             # flash game/save cache (faster loads, SD-optional)
+    FLASHFS_ENABLED=1             # flash game/save cache on (faster loads + SD-optional play; the
+                                  # LCD/SD baud reclaims make the shared spi1 LCD+SD bus coexist)
     SYS_CLOCK_KHZ=300000
     USE_VREG_BOOST=1
     # ST7789 LCD on spi1
@@ -200,6 +201,7 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/pico_lib/dvi/CMakeLists.txt)
         SYS_CLOCK_KHZ=252000          # 21 x 12 MHz — PIO-USB constraint
         USE_VREG_BOOST=1
         PICO_FLASH_SIZE_BYTES=16777216 # 16 MB on the RP2350-PiZero (pico2 default is 4 MB)
+        FLASHFS_ENABLED=1              # flash game/save cache — required (fixes the room-transition blanking)
         PICO_PIO_USE_GPIO_BASE=1       # DVI uses GPIO 32-39 (RP2350B extended range)
         PICO_DEFAULT_PIO_USB_DP_PIN=28 # PIO-USB D+ on GPIO 28
         PICO_STACK_SIZE=4096

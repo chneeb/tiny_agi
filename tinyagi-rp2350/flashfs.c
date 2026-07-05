@@ -6,13 +6,21 @@
 #include "hardware/sync.h"    // save_and_disable_interrupts
 #include "hardware/regs/addressmap.h"  // XIP_BASE
 #include "ff.h"                        // FatFs (SD source for caching)
+#include "sdcard.h"                    // sd_reclaim_bus (shared-bus SD baud)
 
 #include <string.h>
+#include <strings.h>   // strcasecmp
 #include <stdio.h>
 #include <stdlib.h>
 
 // ── Flash region geometry ────────────────────────────────────────────────────
-#define FLASHFS_OFFSET  (1024u * 1024u)                          // 1 MB firmware reserve
+// FLASHFS_OFFSET is the byte offset from 0x10000000 where littlefs starts (space
+// below it is reserved for firmware). Overridable per target — e.g. push it
+// higher to skip a bad lower flash region on a specific board. The region runs to
+// the end of flash: FLASHFS_SIZE = PICO_FLASH_SIZE_BYTES - FLASHFS_OFFSET.
+#ifndef FLASHFS_OFFSET
+#define FLASHFS_OFFSET  (1024u * 1024u)                          // default: 1 MB firmware reserve
+#endif
 #define FLASHFS_SIZE    ((uint32_t)(PICO_FLASH_SIZE_BYTES) - FLASHFS_OFFSET)
 #define FLASHFS_BLOCK   (FLASH_SECTOR_SIZE)                       // 4096 (erase unit)
 
@@ -81,6 +89,13 @@ bool flashfs_init(void) {
     fill_cfg();
     flashfs_write_lock();
     int err = lfs_mount(&lfs, &cfg);
+    if (err == 0 && lfs_fs_size(&lfs) < 0) {
+        // Mounts (superblock OK) but a traversal reports corruption — a partial
+        // fs left by an earlier interrupted/failed write. Reformat to recover.
+        printf("flashfs: mounted but corrupt; reformatting\n");
+        lfs_unmount(&lfs);
+        err = -1;
+    }
     if (err) {
         // First-ever boot (or corrupt): format then mount.
         printf("flashfs: mount failed (%d), formatting %u KB...\n", err, (unsigned)(FLASHFS_SIZE / 1024));
@@ -145,6 +160,39 @@ bool flashfs_has_game(const char *name) {
     return lfs_stat(&lfs, gdir, &info) >= 0 && info.type == LFS_TYPE_DIR;
 }
 
+bool flashfs_delete_game(const char *name) {
+    if (!mounted) return false;
+    char gdir[64];
+    snprintf(gdir, sizeof(gdir), "games/%s", name);
+
+    // Collect file names first (don't mutate the dir while iterating it).
+    char files[24][40];
+    int nf = 0;
+    lfs_dir_t dir;
+    struct lfs_info info;
+    if (lfs_dir_open(&lfs, &dir, gdir) >= 0) {
+        while (nf < 24 && lfs_dir_read(&lfs, &dir, &info) > 0) {
+            if (info.type == LFS_TYPE_REG) {
+                strncpy(files[nf], info.name, sizeof(files[0]) - 1);
+                files[nf][sizeof(files[0]) - 1] = '\0';
+                nf++;
+            }
+        }
+        lfs_dir_close(&lfs, &dir);
+    }
+
+    flashfs_write_lock();
+    for (int i = 0; i < nf; i++) {
+        char fp[96];
+        snprintf(fp, sizeof(fp), "%s/%s", gdir, files[i]);
+        lfs_remove(&lfs, fp);
+    }
+    lfs_remove(&lfs, gdir);   // now-empty dir
+    flashfs_write_unlock();
+    printf("flashfs: deleted cache '%s'\n", name);
+    return true;
+}
+
 int flashfs_list_games(char names[][32], int max) {
     if (!mounted) return 0;
     lfs_dir_t dir;
@@ -162,27 +210,47 @@ int flashfs_list_games(char names[][32], int max) {
     return n;
 }
 
+// Only the AGI resource files are worth caching — skip the DOS interpreter,
+// overlays, docs, save files, etc. that may sit in the game folder.
+static bool is_agi_resource(const char *name) {
+    if (strncasecmp(name, "vol.", 4) == 0) return true;
+    static const char *keep[] = {
+        "logdir", "picdir", "viewdir", "snddir", "object", "words.tok"
+    };
+    for (size_t i = 0; i < sizeof(keep) / sizeof(keep[0]); i++)
+        if (strcasecmp(name, keep[i]) == 0) return true;
+    return false;
+}
+
 // Copy one SD file to littlefs, streaming (files can be >200 KB). Assumes the
 // flash-write lock is already held.
 static bool copy_one_file(const char *sd_path, const char *lfs_path) {
     FIL fil;
-    if (f_open(&fil, sd_path, FA_READ) != FR_OK) return false;
+    FRESULT fr = f_open(&fil, sd_path, FA_READ);
+    if (fr != FR_OK) { printf("  cache: f_open('%s') FR=%d\n", sd_path, fr); return false; }
     struct lfs_file_config fc = {0};
     fc.buffer = g_fcache;
     lfs_file_t lf;
-    if (lfs_file_opencfg(&lfs, &lf, lfs_path,
-                         LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC, &fc) < 0) {
-        f_close(&fil);
-        return false;
-    }
+    int le = lfs_file_opencfg(&lfs, &lf, lfs_path,
+                              LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC, &fc);
+    if (le < 0) { printf("  cache: lfs_open('%s') err=%d\n", lfs_path, le); f_close(&fil); return false; }
     bool ok = true;
+    size_t total = 0;
     for (;;) {
         UINT br = 0;
-        if (f_read(&fil, g_copybuf, sizeof(g_copybuf), &br) != FR_OK) { ok = false; break; }
+        fr = f_read(&fil, g_copybuf, sizeof(g_copybuf), &br);
+        if (fr != FR_OK) { printf("  cache: f_read FR=%d at %u\n", fr, (unsigned)total); ok = false; break; }
         if (br == 0) break;
-        if (lfs_file_write(&lfs, &lf, g_copybuf, br) != (lfs_ssize_t)br) { ok = false; break; }
+        lfs_ssize_t w = lfs_file_write(&lfs, &lf, g_copybuf, br);
+        if (w != (lfs_ssize_t)br) {
+            printf("  cache: lfs_write err=%d (%u B) at offset %u\n", (int)w, (unsigned)br, (unsigned)total);
+            ok = false;
+            break;
+        }
+        total += br;
     }
-    lfs_file_close(&lfs, &lf);
+    int ce = lfs_file_close(&lfs, &lf);
+    if (ok && ce < 0) { printf("  cache: lfs_close err=%d\n", ce); ok = false; }
     f_close(&fil);
     return ok;
 }
@@ -190,6 +258,7 @@ static bool copy_one_file(const char *sd_path, const char *lfs_path) {
 bool flashfs_cache_game(const char *name, const char *src_sd_dir) {
     if (!mounted) return false;
 
+    sd_reclaim_bus();       // shared-bus: SD reads at the SD baud (LCD left it high)
     flashfs_write_lock();   // pause core1 (DVI) for the whole copy
 
     lfs_mkdir(&lfs, "games");            // ignore result (may already exist)
@@ -200,10 +269,11 @@ bool flashfs_cache_game(const char *name, const char *src_sd_dir) {
     DIR dir;
     FILINFO fno;
     bool ok = (f_opendir(&dir, src_sd_dir) == FR_OK);
+    if (!ok) printf("flashfs: f_opendir('%s') failed\n", src_sd_dir);
     while (ok) {
         if (f_readdir(&dir, &fno) != FR_OK || fno.fname[0] == '\0') break;
         if (fno.fattrib & AM_DIR) continue;
-        if (strncmp(fno.fname, "agi_save", 8) == 0) continue;   // don't cache saves
+        if (!is_agi_resource(fno.fname)) continue;   // game data only (skip DOS exe, overlays, saves)
 
         char sd_path[160], lfs_path[96];
         snprintf(sd_path, sizeof(sd_path), "%s/%s", src_sd_dir, fno.fname);

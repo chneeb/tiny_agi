@@ -270,17 +270,25 @@ archive (`DVI_EMBED_GAME`, kept as a guarded single-game test path) and then pro
 - **Flash layout** (offset from `0x10000000`): `0x000000..0x100000` firmware (1 MB reserved),
   `0x100000..end` littlefs (`FLASHFS_SIZE = PICO_FLASH_SIZE_BYTES - 1 MB`; 15 MB on DVI, 3 MB
   on the 4 MB LCD boards). Block device: reads = XIP `memcpy`, prog/erase = `flash_range_*`.
-- **On selecting a game**: if not already cached, copy `SD:/agi/<name>/*` → `/games/<name>/*`
-  (streaming, lowercasing filenames to the engine's bare lowercase names); then always play
-  from flash. Second play skips the copy. `get_file`/`read_file_at` route to `flashfs_read_*`
-  when `play_from_flash` (else SD). Files stored under `/games/<name>/`, saves under `/saves/`.
-- **Chooser merges SD ∪ cached** games with tags `[SD]` / `[flash]` / `[SD+flash]`; **`R`**
-  force-re-caches an SD game. SD is now **optional** — cached games play with no card inserted.
-  The `R` hint + key are compile-gated by `FLASHFS_ENABLED` (in sdcard.c too): with the cache
-  off (picocalc) the hint is hidden and `R` is a no-op — and there is **no flash-write path at
-  all** (no init/format, cache/refresh compiled out, saves → SD), so the cache region is never
-  touched. After the game loads, `main.c` does an `lcd_clear()` so the "Loading:"/cache text
-  doesn't linger in the TFT margins (the centered 320×200 flush never repaints them).
+- **Cache-management menu (`sdcard.c`)**: the chooser merges SD ∪ cached games with tags
+  `[SD]` / `[flash]` / `[SD+flash]`. **ENTER** plays — from flash if cached, else straight from
+  SD (`play_from_flash = choice.in_flash`; `get_file`/`read_file_at` route to `flashfs_read_*`
+  when set, else SD). **`R`** caches/re-caches the selected SD game to flash and stays in the
+  menu; **`D`** deletes its cache. **No auto-caching** — a game is only ever cached because you
+  pressed `R`. So on **DVI**, playing an *uncached* game via ENTER reads from SD → the
+  transition blanking returns; press `R` first for the smooth path. Files stored under
+  `/games/<name>/`, saves under `/saves/`; caching lowercases filenames to the engine's bare
+  lowercase names and **only copies AGI resources** (`logdir/picdir/viewdir/snddir/object/
+  words.tok/vol.*` via `is_agi_resource()`) — not the DOS `AGI` exe / overlays / docs. SD is
+  **optional** — cached games play with no card inserted.
+- **Compile-gated by `FLASHFS_ENABLED`** (in sdcard.c too): with the cache off (picocalc) the
+  `R`/`D` hints are hidden, the keys are no-ops, and there is **no flash-write path at all** (no
+  init/format, cache/delete compiled out, saves → SD) so the cache region is never touched.
+  After a game loads, `main.c` does an `lcd_clear()` so the "Loading:" text doesn't linger in
+  the TFT margins (the centered 320×200 flush never repaints them).
+- **Self-heal**: `flashfs_init()` reformats if mount fails *or* if a post-mount `lfs_fs_size()`
+  reports corruption (a partial fs left by an earlier interrupted/failed write mounts fine but
+  fails every op — this recovers it automatically; wipes the cache).
 - **Saves**: SD when the game is on SD and a card is present (`sd_available && game_on_sd`),
   else littlefs `/saves/<name>.sav` — so SD-less play can still save (separate slot from SD).
 - **Flash-write vs the DVI (critical)**: flash erase/program disables XIP, so no core may
@@ -290,8 +298,8 @@ archive (`DVI_EMBED_GAME`, kept as a guarded single-game test path) and then pro
   that happen while core1 runs use a **cooperative pause** — `flashfs_write_lock` sets a flag,
   core1 (in `display.cpp`) calls `dvi_inst->stop()`, disables IRQs, spins in a RAM-only loop
   during the write, then `dvi_inst->start()` (clean DMA restart; the monitor re-syncs). So the
-  screen goes dark during caching — a clear "First-time setup… screen will go DARK" message is
-  shown *before* the pause (core1 can't draw during it). LCD targets are single-core so
+  screen goes dark during caching — the chooser's `R` handler shows a "Caching… screen may go
+  DARK" message *before* the pause (core1 can't draw during it). LCD targets are single-core so
   `flashfs_write_lock` is the weak no-op there; only per-op `save_and_disable_interrupts` (in the
   block device) is needed.
 - **littlefs geometry**: `block_size = 4096` (flash sector), `prog/read_size = 256`, static
@@ -299,6 +307,11 @@ archive (`DVI_EMBED_GAME`, kept as a guarded single-game test path) and then pro
   file use separate cache buffers).
 - SD baud on DVI is overclocked to **40 MHz** (`dvi/hw_config.c`, effective ~31.5 MHz) to speed
   up the caching copy — card-dependent; drop to 12.5/25 MHz if a card errors.
+- **Shared-bus baud (restouch)**: LCD + SD share spi1, and each device only sets its own baud
+  around its ops — so they'd clobber each other. Two reclaims fix it: `lcdspi_set_address()`
+  reclaims `LCD_SPI_CLOCK_HZ` (80 MHz) per draw, and `sd_reclaim_bus()` (`sd_read_*`/`sd_save_open`/
+  chooser scan/`flashfs_cache_game`) reclaims the SD baud before every SD access. Harmless on
+  picocalc (SD on spi0, LCD on spi1 — separate) and DVI (SD on spi1, display is PIO).
 
 ### Game directory selection
 `show_dir_chooser()` in sdcard.c lists games from SD (`/agi/*`) **and** the flash cache, merged
@@ -442,10 +455,10 @@ See "DVI: display model" under Key design decisions. (Does not fix the transitio
   core1 touches to be in RAM — its code already is (`__not_in_flash_func`), but the palette
   (`agi_palette555`, currently flash rodata) must move to RAM and pico_lib's IRQ path must be
   confirmed flash-free. Medium effort.
-- **Force-format / recovery**: a boot key-combo (e.g. hold ESC → "Reformat flash cache? Y/N")
-  calling `lfs_format`, to recover a cache corrupted by an unrelated firmware write. (Auto-format
-  already handles a corrupt *superblock*; this covers partial corruption where mount still succeeds.
-  Manual fallback today: `picotool erase --range 0x10100000 <end>` then reboot.)
+- **Force-format / recovery (mostly done)**: `flashfs_init()` now auto-reformats both a
+  bad-superblock *and* a "mounts-but-corrupt" fs (post-mount `lfs_fs_size()` check), which covers
+  the partial-corruption case. A user-triggered wipe (boot key-combo → "Reformat? Y/N", or a menu
+  key) would still be a nice-to-have. Manual fallback: `picotool erase --range <fs-start> <end>`.
 - **Atomic refresh**: `R` re-cache currently overwrites files in place (`LFS_O_TRUNC`); switch to
   temp-dir + `lfs_rename` so a power loss mid-refresh can't corrupt the existing cached game.
 - **SD-SPI overclock beyond 40 MHz**: `dvi/hw_config.c` `.baud_rate` — only affects caching speed
@@ -460,8 +473,14 @@ cause; the flash cache proved that) but because it only cut file *opens*, not th
 *data-transfer* time that dominates a load. Superseded on DVI by the flash cache; still a valid
 standalone "faster loads" speedup for SD-direct play (e.g. picocalc) — `git apply` from repo root.
 
-### RESTOUCH: SPI clock drops to 12.5 MHz after SD card access
-`lcdspi_init()` configures spi1 at 80 MHz. The FatFs_SPI library's `my_spi_init()` calls `spi_init(spi1, ...)` (one-time, guarded) then `spi_set_baudrate(spi1, 12.5 MHz)` on each SD access. After any SD read, spi1 is left at 12.5 MHz and all subsequent LCD operations (framebuffer flushes, startup text) run at that reduced rate. ST7789 is within spec at 12.5 MHz so rendering is correct but slower. Fix: call `spi_set_baudrate(LCD_SPI_PORT, LCD_SPI_CLOCK_HZ)` at the start of `lcdspi_set_address()`.
+### RESTOUCH: shared spi1 LCD/SD baud — FIXED
+LCD and SD share spi1, and neither re-asserted its own baud per op, so whoever used the bus last
+set its clock: after an SD access the LCD ran at the SD's 12.5 MHz (slow), and with **no SD
+inserted** the failed SD init left the bus at ~100–400 kHz, so the TFT crawled at seconds-per-frame
+(flashfs's SD-less mode exposed this). Fixed by two reclaims: `lcdspi_set_address()` sets
+`LCD_SPI_CLOCK_HZ` (80 MHz) per draw, and `sd_reclaim_bus()` sets the SD baud before every SD
+access (see "Shared-bus baud" under Flash game/save cache). LCD is now always 80 MHz and SD always
+12.5 MHz, regardless of order. (Bonus: LCD is faster than the old 12.5-MHz-after-SD behaviour too.)
 
 ### Display overlay buffer (not yet implemented)
 `display()` calls write text to the main framebuffer. On idle cycles (no keypress), the game logic may not redraw that text, but `agi_draw_all_active()` still runs and draws sprites over the retained text. This makes sprites visible over persistent display-based overlays such as the PQ1 newspaper (which uses `clear_text_rect()` + `display()` each cycle, but only when a key is pressed).

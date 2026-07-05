@@ -46,6 +46,11 @@ void lcdspi_set_address(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2)
 {
     uint8_t data[4];
 
+    // LCD and SD share spi1; the SD driver leaves the bus at its own (much lower)
+    // baud after any access — and at sub-MHz if no card is present. Reclaim the
+    // LCD clock here so rendering always runs at LCD_SPI_CLOCK_HZ regardless.
+    spi_set_baudrate(LCD_SPI_PORT, LCD_SPI_CLOCK_HZ);
+
     write_command(DCS_SET_COLUMN_ADDRESS);
     data[0] = x1 >> 8; data[1] = x1 & 0xFF;
     data[2] = x2 >> 8; data[3] = x2 & 0xFF;

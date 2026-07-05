@@ -6,6 +6,10 @@
 // Mount the SD card via FatFS. Returns true on success.
 bool sd_card_init(void);
 
+// Re-assert the SD's SPI baud before an SD access (shared-bus targets where the
+// LCD resets the bus clock). No-op-equivalent on dedicated-bus targets.
+void sd_reclaim_bus(void);
+
 // A chooser selection: the game name plus where it lives and whether the user
 // asked to re-cache it (R). on_sd/in_flash let main() decide caching.
 typedef struct {

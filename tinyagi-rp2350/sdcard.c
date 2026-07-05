@@ -4,6 +4,7 @@
 #include "flashfs.h"
 #include "ff.h"
 #include "sd_card.h"
+#include "sd_spi.h"
 #include "hw_config.h"
 #include "pico/stdlib.h"
 #include <stdio.h>
@@ -22,6 +23,17 @@ bool sd_card_init(void)
     if (!card) return false;
     FRESULT r = f_mount(&fs, "0:", 1);
     return r == FR_OK;
+}
+
+// Re-assert the SD's SPI baud before an SD access. Needed on shared-bus targets
+// (restouch: LCD+SD on spi1) where the LCD resets the bus to its own 80 MHz on
+// every draw; without this the next SD transfer runs at 80 MHz and fails. On
+// dedicated-bus targets it just re-sets the same baud (harmless). Only valid
+// after init (the low-freq init phase happens inside sd_card_init).
+void sd_reclaim_bus(void)
+{
+    sd_card_t *card = sd_get_by_num(0);
+    if (card) sd_spi_go_high_frequency(card);
 }
 
 #define MAX_GAMES 32
@@ -44,14 +56,15 @@ static int find_game(const game_entry_t *g, int count, const char *name) {
     return -1;
 }
 
-bool show_dir_chooser(game_choice_t *out)
+// Build the merged SD ∪ flash-cached game list into games[]; returns the count.
+static int build_game_list(game_entry_t *games)
 {
-    game_entry_t games[MAX_GAMES];
     int count = 0;
 
     // SD games (if a card is present).
     DIR dir;
     FILINFO fno;
+    sd_reclaim_bus();
     if (f_opendir(&dir, "0:/agi") == FR_OK) {
         while (count < MAX_GAMES) {
             if (f_readdir(&dir, &fno) != FR_OK || fno.fname[0] == '\0') break;
@@ -80,7 +93,13 @@ bool show_dir_chooser(game_choice_t *out)
             count++;
         }
     }
+    return count;
+}
 
+bool show_dir_chooser(game_choice_t *out)
+{
+    game_entry_t games[MAX_GAMES];
+    int count = build_game_list(games);
     if (count == 0) {
         lcd_clear();
         lcd_print_string("No games (SD or flash)!\n");
@@ -95,7 +114,7 @@ bool show_dir_chooser(game_choice_t *out)
             lcd_clear();
             lcd_print_string("Select game:\n");
 #if FLASHFS_ENABLED
-            lcd_print_string("UP/DN  ENTER  R=refresh\n\n");
+            lcd_print_string("ENTER=play R=cache D=del\n\n");
 #else
             lcd_print_string("UP/DN  ENTER\n\n");
 #endif
@@ -118,7 +137,7 @@ bool show_dir_chooser(game_choice_t *out)
             if (sel > 0) { sel--; redraw = true; }
         } else if (key == 0xB6) {                   // DOWN
             if (sel < count - 1) { sel++; redraw = true; }
-        } else if (key == KB_ENTER_CODE) {           // ENTER
+        } else if (key == KB_ENTER_CODE) {           // ENTER = play (flash if cached, else SD)
             strncpy(out->name, games[sel].name, sizeof(out->name) - 1);
             out->name[sizeof(out->name) - 1] = '\0';
             out->on_sd = games[sel].on_sd;
@@ -127,20 +146,41 @@ bool show_dir_chooser(game_choice_t *out)
             return true;
         }
 #if FLASHFS_ENABLED
-        else if (key == 'r' || key == 'R') {         // R = force re-cache
+        else if (key == 'r' || key == 'R') {         // R = cache/re-cache from SD (stay in menu)
             if (games[sel].on_sd) {
-                strncpy(out->name, games[sel].name, sizeof(out->name) - 1);
-                out->name[sizeof(out->name) - 1] = '\0';
-                out->on_sd = true;
-                out->in_flash = games[sel].in_flash;
-                out->refresh = true;
-                return true;
+                lcd_clear();
+                lcd_print_string("Caching to flash:\n  ");
+                lcd_print_string(games[sel].name);
+                lcd_print_string("\n\nScreen may go DARK.\nPlease wait, do not unplug.\n");
+                sleep_ms(1800);   // readable before core1 (DVI) stops
+                char sd[80];
+                snprintf(sd, sizeof(sd), "0:/agi/%s", games[sel].name);
+                flashfs_cache_game(games[sel].name, sd);
+                count = build_game_list(games);       // refresh tags
             } else {
                 lcd_clear();
-                lcd_print_string("Insert SD with this game\nto refresh it.\n");
+                lcd_print_string("Not on SD - can't cache.\nInsert the SD card.\n");
                 sleep_ms(1500);
-                redraw = true;
             }
+            redraw = true;
+        }
+        else if (key == 'd' || key == 'D') {         // D = delete flash cache (stay in menu)
+            if (games[sel].in_flash) {
+                flashfs_delete_game(games[sel].name);
+                count = build_game_list(games);
+                if (count == 0) {
+                    lcd_clear();
+                    lcd_print_string("No games left.\n");
+                    sleep_ms(1200);
+                    return false;
+                }
+                if (sel >= count) sel = count - 1;
+            } else {
+                lcd_clear();
+                lcd_print_string("Not cached.\n");
+                sleep_ms(900);
+            }
+            redraw = true;
         }
 #endif  /* FLASHFS_ENABLED */
         else if (key == 0x1B || key == 0xB1) {      // ESC
@@ -151,6 +191,7 @@ bool show_dir_chooser(game_choice_t *out)
 
 uint8_t *sd_read_file(const char *path, size_t *out_size)
 {
+    sd_reclaim_bus();
     FIL fil;
     FRESULT r = f_open(&fil, path, FA_READ);
     if (r != FR_OK) return NULL;
@@ -175,6 +216,7 @@ void sd_free_file(uint8_t *buf)
 
 size_t sd_read_file_at(const char *path, size_t offset, void *buf, size_t len)
 {
+    sd_reclaim_bus();
     FIL fil;
     FRESULT r = f_open(&fil, path, FA_READ);
     if (r != FR_OK) return 0;
@@ -190,6 +232,7 @@ static bool save_is_open = false;
 
 bool sd_save_open(const char *path, bool write)
 {
+    sd_reclaim_bus();
     if (save_is_open) f_close(&save_fil);
     BYTE mode = write ? (FA_WRITE | FA_CREATE_ALWAYS) : FA_READ;
     FRESULT r = f_open(&save_fil, path, mode);

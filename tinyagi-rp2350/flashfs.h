@@ -30,6 +30,8 @@ bool flashfs_has_game(const char *name);
 bool flashfs_cache_game(const char *name, const char *src_sd_dir);
 // List cached game names into names[max]; returns the count.
 int  flashfs_list_games(char names[][32], int max);
+// Delete a cached game (/games/<name> and its files). Returns true.
+bool flashfs_delete_game(const char *name);
 
 // ── Game reads (served to get_file / read_file_at for the playing game) ──────
 // Whole file from /games/<game>/<filename> into a malloc'd buffer (caller frees).

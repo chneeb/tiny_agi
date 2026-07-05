@@ -209,24 +209,9 @@ int main(void) {
         snprintf(game_dir, sizeof(game_dir), "0:/agi/%s", game_name);
 
 #if FLASHFS_ENABLED
-        // Cache from SD on first play (or re-cache on R), then always play from
-        // flash — that's what keeps transitions fast (no SD during play). The copy
-        // stops core1, so on DVI the screen goes dark and can't show progress;
-        // set expectations here, while it's still visible.
-        if (choice.refresh || !choice.in_flash) {
-            lcd_clear();
-            lcd_print_string(choice.refresh ? "Refreshing from SD\n\n"
-                                            : "First-time setup\n\n");
-            lcd_print_string("Copying ");
-            lcd_print_string(game_name);
-            lcd_print_string(" to flash.\n\n");
-            lcd_print_string("The screen will go DARK for\n");
-            lcd_print_string("a bit. Please wait and do\n");
-            lcd_print_string("not unplug the device...\n");
-            sleep_ms(2500);   // let the message be read before core1 stops
-            flashfs_cache_game(game_name, game_dir);
-        }
-        play_from_flash = true;   // FLASHFS off -> stays false -> get_file reads SD
+        // Caching is managed in the menu (R = cache, D = delete). Play from flash
+        // when the game is cached; otherwise read straight from SD (no auto-cache).
+        play_from_flash = choice.in_flash;
 #endif  /* FLASHFS_ENABLED */
 #endif  /* !DVI_EMBED_GAME */
 
