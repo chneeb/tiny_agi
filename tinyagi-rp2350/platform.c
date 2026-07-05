@@ -9,9 +9,11 @@
 #include "kbd_input.h"
 #include "sdcard.h"
 #include "flashfs.h"
-#if SOUND_ENABLED
+// The AGI sound *sequencer* runs on every target (it's linked everywhere) so
+// that sound-paced game logic keeps correct timing — the intro title cards, for
+// example, are shown *while a sound is playing* and only advance when it ends.
+// SOUND_ENABLED gates only the audio *output* (PWM / HDMI), not this timing.
 #include "agi_sound_player/agi_sound.h"
-#endif
 
 // -----------------------------------------------------------------------
 // Game location set by main() after the chooser runs.
@@ -185,7 +187,6 @@ void check_key(void) {
 // Sound
 // -----------------------------------------------------------------------
 void platform_tick_sound(void) {
-#if SOUND_ENABLED
     static uint32_t last_ms = 0;
     static uint32_t accum_ms = 0;
     static bool first_call = true;
@@ -216,22 +217,17 @@ void platform_tick_sound(void) {
             agi_stop_sound();
         }
     }
-#endif
 }
 
 void platform_flush_display(void) {
     flush_display();
-#if SOUND_ENABLED
     platform_tick_sound();
-#endif
 }
 
 void wait_for_enter(void) {
     flush_display();
     while (1) {
-#if SOUND_ENABLED
         platform_tick_sound();
-#endif
         int key = kbd_read();
         if (key < 0) continue;
         // KB_ENTER_CODE, PicoCalc ESC (0xB1), and standard ESC (0x1B) all dismiss.
@@ -252,27 +248,17 @@ bool wait_for_key_yn(void) {
 }
 
 void agi_play_sound(uint8_t *sound_data) {
-#if SOUND_ENABLED
+    /* Always run the sequencer — it decodes the sound and tracks its duration so
+     * platform_tick_sound() can set the completion flag at the *right* time. On
+     * targets with no audio output (SOUND_ENABLED=0) it just updates the channel
+     * frequency table, which nothing plays; the timing is what matters (e.g. the
+     * intro shows a title card *while* its sound plays). This replaces an earlier
+     * instant-completion hack that made sound-paced logic race/desync. */
     agi_sound_start(sound_data);
-#else
-    /* No audio hardware on this target.  Signal sound completion immediately
-     * so game logic that waits for the sound-done flag doesn't hang.  Such a
-     * wait is often a tight bytecode goto-loop that never returns to the main
-     * game loop, so it must be satisfied synchronously here (a deferred
-     * platform_tick_sound() would never get a chance to run).  This also frees
-     * the single sound channel (sound_flag) for the next sound() call. */
-    (void)sound_data;
-    if (state.sound_flag > -1) {
-        state.flags[state.sound_flag] = true;
-        state.sound_flag = -1;
-    }
-#endif
 }
 
 void agi_stop_sound(void) {
-#if SOUND_ENABLED
     agi_sound_stop();
-#endif
 }
 
 // -----------------------------------------------------------------------

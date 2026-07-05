@@ -113,7 +113,9 @@ A/B'd marginally worse, including with audio).
 - SPI1 shared by LCD (DC=8, CS=9, CLK=10, MOSI=11, RST=15, BL=13) and SD (CS=22, MISO=12).
 - Touch CS (GP16) parked HIGH — touch not used.
 - M5Stack CardKB on i2c1 (SDA=GP2, SCL=GP3, I2C addr 0x5F).
-- No audio hardware; SOUND_ENABLED=0 stubs out the audio path at compile time.
+- No audio hardware; SOUND_ENABLED=0 compiles out the audio *output* (no PWM). The sound
+  *sequencer* still runs for timing so sound-paced logic (e.g. the intro) stays in sync — see
+  "Sound timing decoupled from audio output".
 
 ### DVI (`tinyagi_dvi`) — Waveshare RP2350-PiZero (RP2350B)
 - RP2350B at **252 MHz** (vreg boost 1.20 V). 252 = 21×12 MHz, required by PIO-USB.
@@ -232,10 +234,24 @@ Enabling audio glitches the DVI signal on **some monitors** (screen black, monit
   strict about — needs a capture/analyzer or a known-good HDMI-audio reference to pin down.
 Mitigation for now: shipped off (`SOUND_ENABLED=0` + `DVI_HDMI_AUDIO=0`); code stays behind the flag.
 
-Note: with `SOUND_ENABLED=1`, sound-done is signalled by the real path (`platform_tick_sound()`
-sees `agi_sound_is_playing()` go false), replacing the earlier synchronous-completion hack that
-was only needed when `SOUND_ENABLED=0`. That hack (`agi_play_sound()` `#else` branch) still exists
-for the restouch target (`SOUND_ENABLED=0`), where a sound-wait would otherwise hang forever.
+### Sound timing decoupled from audio output (all targets)
+The AGI sound **sequencer** (`agi_sound_player/agi_sound.c`) runs on **every** target, including
+`SOUND_ENABLED=0` (restouch). `SOUND_ENABLED` now gates only the audio **output** (PWM on
+picocalc, HDMI data-island on DVI); the sequencer's **timing** always runs. This matters because
+sound-paced game logic keys off the sound-done flag: e.g. the SQ1 intro plays a sound arming flag
+162 and shows each title card (incl. "Sarien Encounter") **while that sound is playing** (`f162`
+still false), advancing only when it ends. `platform_tick_sound()` (called every cycle from
+`main.c`, `platform_flush_display()`, `wait_for_enter()`) advances the sequencer and sets the
+completion flag at the sound's **real** end. On no-output targets the sequencer just updates the
+`pwm_synth_channels[]` frequency table (which nothing plays) — silent, but correctly timed.
+- This **replaced an instant-completion hack** in `agi_play_sound()` that (on `SOUND_ENABLED=0`)
+  set the sound-done flag immediately. That made sounds "finish" the instant they started, so the
+  "while sound playing" window never existed → the intro's title cards never showed and the state
+  machine raced/desynced. Now restouch times sounds exactly like the sound-on boards, just muted.
+- Safe for picocalc/DVI: for `SOUND_ENABLED=1` the ungated paths are the code that already ran,
+  so those targets are behaviorally unchanged (the HDMI-audio output path is untouched).
+- The sequencer is pure data (no hardware): `agi_sound_start/tick` only touch `pwm_synth_channels[]`
+  and `pwm_synth_silence_all_channels()` (zeroes the table) — safe without `pwm_synth_init()`.
 
 ### DVI: DMA bus priority — tried and REMOVED
 `display_init()` used to set `bus_ctrl_hw->priority = DMA_R | DMA_W` (DVI scan-out DMA wins bus

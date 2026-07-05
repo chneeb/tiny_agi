@@ -240,9 +240,10 @@ int main(void) {
             bool did_run = agi_logic_run_cycle(now_ms);
             if (did_run) {
                 flush_display();
-#if SOUND_ENABLED
+                // Always advance the sound *sequencer* — it paces sound-gated
+                // game logic (intro title cards etc.) even on targets with no
+                // audio output. SOUND_ENABLED gates only the PWM/HDMI output.
                 platform_tick_sound();
-#endif
             }
 
             if (state.game_state == STATE_QUIT) break;
