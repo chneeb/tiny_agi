@@ -276,6 +276,11 @@ archive (`DVI_EMBED_GAME`, kept as a guarded single-game test path) and then pro
   when `play_from_flash` (else SD). Files stored under `/games/<name>/`, saves under `/saves/`.
 - **Chooser merges SD ∪ cached** games with tags `[SD]` / `[flash]` / `[SD+flash]`; **`R`**
   force-re-caches an SD game. SD is now **optional** — cached games play with no card inserted.
+  The `R` hint + key are compile-gated by `FLASHFS_ENABLED` (in sdcard.c too): with the cache
+  off (picocalc) the hint is hidden and `R` is a no-op — and there is **no flash-write path at
+  all** (no init/format, cache/refresh compiled out, saves → SD), so the cache region is never
+  touched. After the game loads, `main.c` does an `lcd_clear()` so the "Loading:"/cache text
+  doesn't linger in the TFT margins (the centered 320×200 flush never repaints them).
 - **Saves**: SD when the game is on SD and a card is present (`sd_available && game_on_sd`),
   else littlefs `/saves/<name>.sav` — so SD-less play can still save (separate slot from SD).
 - **Flash-write vs the DVI (critical)**: flash erase/program disables XIP, so no core may

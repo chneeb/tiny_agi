@@ -27,6 +27,11 @@ bool sd_card_init(void)
 #define MAX_GAMES 32
 #define NAME_LEN  32
 
+// Match main.c's default; CMakeLists overrides per target (picocalc=0).
+#ifndef FLASHFS_ENABLED
+#define FLASHFS_ENABLED 1
+#endif
+
 typedef struct {
     char name[NAME_LEN];
     bool on_sd;
@@ -89,7 +94,11 @@ bool show_dir_chooser(game_choice_t *out)
         if (redraw) {
             lcd_clear();
             lcd_print_string("Select game:\n");
+#if FLASHFS_ENABLED
             lcd_print_string("UP/DN  ENTER  R=refresh\n\n");
+#else
+            lcd_print_string("UP/DN  ENTER\n\n");
+#endif
             for (int i = 0; i < count; i++) {
                 const char *tag = games[i].on_sd
                     ? (games[i].in_flash ? " [SD+flash]" : " [SD]")
@@ -116,7 +125,9 @@ bool show_dir_chooser(game_choice_t *out)
             out->in_flash = games[sel].in_flash;
             out->refresh = false;
             return true;
-        } else if (key == 'r' || key == 'R') {       // R = force re-cache
+        }
+#if FLASHFS_ENABLED
+        else if (key == 'r' || key == 'R') {         // R = force re-cache
             if (games[sel].on_sd) {
                 strncpy(out->name, games[sel].name, sizeof(out->name) - 1);
                 out->name[sizeof(out->name) - 1] = '\0';
@@ -130,7 +141,9 @@ bool show_dir_chooser(game_choice_t *out)
                 sleep_ms(1500);
                 redraw = true;
             }
-        } else if (key == 0x1B || key == 0xB1) {    // ESC
+        }
+#endif  /* FLASHFS_ENABLED */
+        else if (key == 0x1B || key == 0xB1) {      // ESC
             return false;
         }
     }

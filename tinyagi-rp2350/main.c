@@ -240,6 +240,11 @@ int main(void) {
         lcd_print_string("\n");
         agi_initialize();
 
+        // Wipe the "Loading:"/cache text before the game draws — on the LCD
+        // targets it lives in the TFT margins, which the centered 320x200 frame
+        // flush never paints over (harmless brief black on DVI).
+        lcd_clear();
+
         while (1) {
             uint32_t now_ms = to_ms_since_boot(get_absolute_time());
 #if DVI_DBG_TIMER
