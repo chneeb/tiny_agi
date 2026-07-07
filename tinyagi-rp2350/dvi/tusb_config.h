@@ -33,7 +33,17 @@ extern "C" {
 #define CFG_TUSB_MEM_ALIGN  __attribute__((aligned(4)))
 #endif
 
-/* ── Device (rhport 0, hardware USB → USB-C → CDC serial) ─────────────────── */
+#if RP2040_PIZERO
+/* ── RP2040-PiZero: native USB controller is the HID keyboard HOST (rhport 0) ─
+   No device stack (no USB-CDC console — console is UART), no PIO-USB.  This is
+   what frees GPIO 28 for the DVI clock (PIO-USB D+ used to sit there).        */
+#define CFG_TUD_ENABLED        0
+#define CFG_TUH_ENABLED        1
+#define CFG_TUH_RPI_PIO_USB    0
+#define BOARD_TUH_RHPORT       0
+#else
+/* ── RP2350-PiZero: device (CDC, rhport 0 native) + host (HID, rhport 1 PIO-USB) ── */
+/* Device (rhport 0, hardware USB → USB-C → CDC serial) */
 #define CFG_TUSB_RHPORT0_MODE  (OPT_MODE_DEVICE | OPT_MODE_FULL_SPEED)
 #define CFG_TUD_ENABLED        1
 #define CFG_TUD_CDC            1
@@ -44,13 +54,14 @@ extern "C" {
 #define CFG_TUD_MIDI           0
 #define CFG_TUD_VENDOR         0
 
-/* ── Host (rhport 1, PIO-USB → USB-A → HID keyboard) ─────────────────────── */
-/* rhport 1 mode is set at runtime by tuh_configure() in kbd_input_init().
+/* Host (rhport 1, PIO-USB → USB-A → HID keyboard).
+   rhport 1 mode is set at runtime by tuh_configure() in kbd_input_init().
    CFG_TUH_ENABLED must be set explicitly so tusb.h pulls in the host headers
    even though CFG_TUSB_RHPORT1_MODE is not defined statically.               */
 #define CFG_TUH_ENABLED        1
 #define CFG_TUH_RPI_PIO_USB    1
 #define BOARD_TUH_RHPORT       1
+#endif
 
 #ifndef BOARD_TUH_MAX_SPEED
 #define BOARD_TUH_MAX_SPEED  OPT_MODE_FULL_SPEED

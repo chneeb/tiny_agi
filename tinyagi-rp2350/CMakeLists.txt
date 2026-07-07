@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.13)
 
-set(PICO_BOARD pico2)
+# Platform select. PICO_BOARD/PICO_PLATFORM is global to a configure, so the
+# RP2040 and RP2350 targets can't coexist in one build. Default: the three
+# RP2350 (pico2) targets. -DTINYAGI_RP2040_PIZERO=ON: only the RP2040-PiZero DVI
+# target (use a separate build dir, e.g. build_rp2040/).
+option(TINYAGI_RP2040_PIZERO "Build the RP2040-PiZero DVI target instead of the RP2350 targets" OFF)
+if(TINYAGI_RP2040_PIZERO)
+    set(PICO_BOARD pico)    # RP2040
+else()
+    set(PICO_BOARD pico2)   # RP2350 / Pico 2
+endif()
 include(pico_sdk_import.cmake)
 
 project(tinyagi_rp2350 C CXX ASM)
@@ -11,10 +20,12 @@ pico_sdk_init()
 # littlefs (flash game/save cache) — shared by all targets
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/littlefs)
 
-# ── External libraries (PicoCalc hardware modules) ───────────────────────────
-set(PICOCALC_HW ${CMAKE_CURRENT_SOURCE_DIR}/../../PicoCalc/Code/picocalc_helloworld)
-add_subdirectory(${PICOCALC_HW}/i2ckbd ${CMAKE_CURRENT_BINARY_DIR}/i2ckbd)
-add_subdirectory(${PICOCALC_HW}/lcdspi ${CMAKE_CURRENT_BINARY_DIR}/lcdspi)
+# ── External libraries (PicoCalc hardware modules) — LCD targets only ────────
+if(NOT TINYAGI_RP2040_PIZERO)
+    set(PICOCALC_HW ${CMAKE_CURRENT_SOURCE_DIR}/../../PicoCalc/Code/picocalc_helloworld)
+    add_subdirectory(${PICOCALC_HW}/i2ckbd ${CMAKE_CURRENT_BINARY_DIR}/i2ckbd)
+    add_subdirectory(${PICOCALC_HW}/lcdspi ${CMAKE_CURRENT_BINARY_DIR}/lcdspi)
+endif()
 
 # ── AGI engine ───────────────────────────────────────────────────────────────
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../agi ${CMAKE_CURRENT_BINARY_DIR}/tinyagi)
@@ -52,6 +63,9 @@ set(AUDIO_SOURCES
     audio/pwm_synth.c
     agi_sound_player/agi_sound.c
 )
+
+# ══ RP2350 targets (PicoCalc, RESTOUCH, DVI) ═════════════════════════════════
+if(NOT TINYAGI_RP2040_PIZERO)
 
 # ── PicoCalc target ──────────────────────────────────────────────────────────
 add_executable(tinyagi_picocalc
@@ -234,3 +248,77 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/pico_lib/dvi/CMakeLists.txt)
     pico_enable_stdio_uart(tinyagi_dvi 1)
     pico_add_extra_outputs(tinyagi_dvi)
 endif()
+
+# ══ RP2040-PiZero DVI target ═════════════════════════════════════════════════
+else()
+
+# Reuses the entire dvi/ port; RP2040_PIZERO switches the board-specific bits
+# (TMDS pins 26/24/22 clk 28, SD on spi0, native-USB keyboard host). No double
+# buffer (264 KB SRAM), no HDMI audio, UART-only console.
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/pico_lib/dvi/CMakeLists.txt)
+    add_subdirectory(pico_lib/dvi  ${CMAKE_CURRENT_BINARY_DIR}/pico_lib_dvi)
+    add_subdirectory(pico_lib/util ${CMAKE_CURRENT_BINARY_DIR}/pico_lib_util)
+
+    add_executable(tinyagi_dvi_rp2040
+        ${COMMON_SOURCES}
+        ${AUDIO_SOURCES}
+        dvi/sd_spi_poll.c   # DMA-poll SD driver (replaces stock spi.c)
+        dvi/display.cpp
+        dvi/kbd_input.c     # native-USB host path via RP2040_PIZERO guard
+        dvi/hw_config.c     # SD on spi0 via RP2040_PIZERO guard
+        # usb_descriptors.c omitted: no CDC device (native USB is the keyboard host)
+    )
+
+    target_include_directories(tinyagi_dvi_rp2040 PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/dvi
+        ${FATFS_DIR}/ff15/source
+        ${FATFS_DIR}/sd_driver
+        ${FATFS_DIR}/include
+        pico_lib
+    )
+
+    target_compile_definitions(tinyagi_dvi_rp2040 PRIVATE
+        DVI_TARGET=1
+        RP2040_PIZERO=1                # board-specific pins + native-USB keyboard host
+        DVI_ENABLE_CDC=0               # native USB is the HID host; console = UART only
+        DVI_KEEPALIVE_TIMER=1
+        DVI_DOUBLE_BUFFER=0            # 264 KB SRAM: no room for the 64 KB scanout buffer
+        SOUND_ENABLED=0                # no HDMI audio on RP2040 yet; sequencer still times sound
+        DVI_HDMI_AUDIO=0
+        KB_ENTER_CODE=0x0D
+        KB_F10_CODE=0x8A
+        SYS_CLOCK_KHZ=252000
+        USE_VREG_BOOST=1
+        PICO_FLASH_SIZE_BYTES=16777216 # RP2040-PiZero: 16 MB (littlefs cache = 15 MB, ~28 games)
+        FLASHFS_ENABLED=1
+        PICO_STACK_SIZE=4096
+        PICO_CORE1_STACK_SIZE=3072
+        CFG_TUSB_CONFIG_FILE="tusb_config.h"
+    )
+
+    target_link_libraries(tinyagi_dvi_rp2040
+        tinyagi
+        pico_stdlib
+        pico_multicore
+        hardware_clocks
+        hardware_vreg
+        hardware_spi
+        hardware_dma
+        hardware_pio
+        hardware_pwm
+        hardware_irq
+        hardware_interp
+        hardware_flash
+        dvi
+        util
+        tinyusb_host
+        tinyusb_board
+    )
+
+    pico_enable_stdio_usb(tinyagi_dvi_rp2040 0)
+    pico_enable_stdio_uart(tinyagi_dvi_rp2040 1)
+    pico_add_extra_outputs(tinyagi_dvi_rp2040)
+endif()
+
+endif()  # TINYAGI_RP2040_PIZERO

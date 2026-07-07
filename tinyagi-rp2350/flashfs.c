@@ -85,6 +85,20 @@ static void fill_cfg(void) {
 
 uint32_t flashfs_region_size(void) { return FLASHFS_SIZE; }
 
+void flashfs_df(uint32_t *total, uint32_t *used, uint32_t *free_bytes) {
+    uint32_t t = FLASHFS_SIZE, u = 0;
+    if (mounted) {
+        lfs_ssize_t blocks = lfs_fs_size(&lfs);
+        if (blocks >= 0) {
+            u = (uint32_t)blocks * FLASHFS_BLOCK;
+            if (u > t) u = t;   // lfs_fs_size can overcount shared metadata
+        }
+    }
+    if (total)      *total      = t;
+    if (used)       *used       = u;
+    if (free_bytes) *free_bytes = t - u;
+}
+
 bool flashfs_init(void) {
     fill_cfg();
     flashfs_write_lock();

@@ -1,9 +1,13 @@
-/* USB HID keyboard driver for the DVI target via PIO-USB.
+/* USB HID keyboard driver for the DVI target.
  *
- * pio0 is occupied by DVI, so PIO-USB uses pio1.
- * DVI claims DMA channels 0-5; PIO-USB is configured to use channel 7.
- * tuh_init(1) targets rhport 1 — do NOT use tusb_init() or board_init().
- * tuh_task() is called from kbd_read() on every poll.
+ * RP2350-PiZero: PIO-USB host on rhport 1 (pio0 is DVI, so PIO-USB uses pio1;
+ *   DVI claims DMA 0-5 so PIO-USB uses channel 7). The native USB controller is
+ *   a CDC device (console). tuh_init(1); do NOT use tusb_init()/board_init().
+ * RP2040-PiZero (RP2040_PIZERO): the native USB controller is the HID host on
+ *   rhport 0 (tuh_init(0)) — GPIO 28 is the DVI clock there, so PIO-USB can't be
+ *   used. No CDC device (console is UART). No board_init() (it resets the clock).
+ * Either way tuh_task() is pumped from kbd_read(), and the HID translation +
+ * mount/report callbacks below are shared (same TinyUSB host API).
  *
  * HID keycodes are translated to the virtual-key values expected by
  * platform.c's push_kbd_event():
@@ -15,7 +19,9 @@
 
 #include "kbd_input.h"
 #include "tusb.h"
+#if !RP2040_PIZERO
 #include "pio_usb.h"
+#endif
 #include "pico/stdlib.h"
 #include "pico/stdio/driver.h" /* full stdio_driver_t definition + stdio_set_driver_enabled */
 #include "spi.h"          /* set_spi_dma_irq_channel() — FatFs_SPI sd_driver */
@@ -88,6 +94,10 @@ void kbd_input_init(void) {
        Must be called before sd_card_init() / f_mount(). */
     set_spi_dma_irq_channel(true, true);
 
+#if RP2040_PIZERO
+    /* Native USB controller as HID host (rhport 0). No PIO-USB, no board_init(). */
+    tuh_init(0);
+#else
     pio_usb_configuration_t pio_cfg = PIO_USB_DEFAULT_CONFIG;
     pio_cfg.pin_dp     = PICO_DEFAULT_PIO_USB_DP_PIN; /* GPIO 28; PIO_USB_DEFAULT_CONFIG defaults to 0 */
     pio_cfg.pio_tx_num = 1;  /* pio0 is DVI */
@@ -98,6 +108,7 @@ void kbd_input_init(void) {
 #if DVI_ENABLE_CDC
     tud_init(0); /* USB CDC device on native hardware controller (USB-C port) */
 #endif
+#endif /* RP2040_PIZERO */
 }
 
 int kbd_read(void) {

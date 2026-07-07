@@ -21,6 +21,11 @@ bool flashfs_selftest(void);
 // Bytes available in the littlefs region (for diagnostics / "flash full").
 uint32_t flashfs_region_size(void);
 
+// Cache usage for the boot menu: total region, used, and free bytes (any may be
+// NULL). Uses lfs_fs_size(); safe when unmounted (reports 0 used). Note used can
+// slightly overcount (littlefs counts shared metadata per-reference) — clamped.
+void flashfs_df(uint32_t *total, uint32_t *used, uint32_t *free_bytes);
+
 // ── Game cache ───────────────────────────────────────────────────────────────
 // Is <name> cached in flash (/games/<name> exists)?
 bool flashfs_has_game(const char *name);

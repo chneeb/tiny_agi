@@ -88,7 +88,11 @@ static volatile uint32_t dvi_loop_frames = 0;
 /* Dedicated core1 stack (8 KB) in main RAM — replaces the default ~3 KB
  * SCRATCH_Y stack, both to test the stack-overflow theory and to move the
  * stack away from whatever core0 activity may be corrupting it. */
+#if RP2040_PIZERO
+static uint32_t core1_stack[1024] __attribute__((aligned(8)));   /* 4 KB — DVI loop is shallow; saves heap on RP2040 */
+#else
 static uint32_t core1_stack[2048] __attribute__((aligned(8)));
+#endif
 
 /* ── core1 fault capture ─────────────────────────────────────────────────
  * Overrides the SDK's weak isr_hardfault (shared vector table).  Whichever
@@ -165,8 +169,13 @@ extern "C" {
 }
 
 static const dvi::Config dvi_cfg = {
-    .pinTMDS  = {36, 34, 32},  /* Blue, Green, Red */
+#if RP2040_PIZERO
+    .pinTMDS  = {26, 24, 22},  /* Blue, Green, Red — Waveshare RP2040-PiZero mini-HDMI */
+    .pinClock = 28,
+#else
+    .pinTMDS  = {36, 34, 32},  /* Blue, Green, Red — Waveshare RP2350-PiZero (GPIO 32-39) */
     .pinClock = 38,
+#endif
     .invert   = false,
 };
 

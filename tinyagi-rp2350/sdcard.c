@@ -108,13 +108,23 @@ bool show_dir_chooser(game_choice_t *out)
 
     int sel = 0;
     bool redraw = true;
+#if FLASHFS_ENABLED
+    uint32_t fs_total = 0, fs_free = 0;
+    flashfs_df(&fs_total, NULL, &fs_free);   // recomputed after R/D below
+#endif
 
     while (1) {
         if (redraw) {
             lcd_clear();
             lcd_print_string("Select game:\n");
 #if FLASHFS_ENABLED
-            lcd_print_string("ENTER=play R=cache D=del\n\n");
+            lcd_print_string("ENTER=play R=cache D=del\n");
+            char fline[40];
+            snprintf(fline, sizeof(fline), "Flash: %lu.%luM free / %luM\n\n",
+                     (unsigned long)(fs_free / 1048576UL),
+                     (unsigned long)((fs_free % 1048576UL) * 10UL / 1048576UL),
+                     (unsigned long)(fs_total / 1048576UL));
+            lcd_print_string(fline);
 #else
             lcd_print_string("UP/DN  ENTER\n\n");
 #endif
@@ -155,8 +165,18 @@ bool show_dir_chooser(game_choice_t *out)
                 sleep_ms(1800);   // readable before core1 (DVI) stops
                 char sd[80];
                 snprintf(sd, sizeof(sd), "0:/agi/%s", games[sel].name);
-                flashfs_cache_game(games[sel].name, sd);
+                bool cached = flashfs_cache_game(games[sel].name, sd);
+                if (!cached) {
+                    // Out of flash (or a mid-copy error) leaves a partial cache —
+                    // delete it so the game doesn't show as [flash] but play broken.
+                    flashfs_delete_game(games[sel].name);
+                    lcd_clear();
+                    lcd_print_string("Cache FAILED\n(flash full?)\n\n"
+                                     "Partial cache removed.\n");
+                    sleep_ms(2500);
+                }
                 count = build_game_list(games);       // refresh tags
+                flashfs_df(&fs_total, NULL, &fs_free); // cache changed free space
             } else {
                 lcd_clear();
                 lcd_print_string("Not on SD - can't cache.\nInsert the SD card.\n");
@@ -168,6 +188,7 @@ bool show_dir_chooser(game_choice_t *out)
             if (games[sel].in_flash) {
                 flashfs_delete_game(games[sel].name);
                 count = build_game_list(games);
+                flashfs_df(&fs_total, NULL, &fs_free); // cache changed free space
                 if (count == 0) {
                     lcd_clear();
                     lcd_print_string("No games left.\n");

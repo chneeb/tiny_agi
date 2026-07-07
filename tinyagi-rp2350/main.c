@@ -119,7 +119,13 @@ static bool audio_producer_cb(struct repeating_timer *t) {
  * overflow 4 KB and grow down into SCRATCH_X, corrupting the encoder that
  * core1 is executing → core1 faults and the screen goes dark.  We move core0's
  * stack here so it can never reach SCRATCH_X.  32 KB is ample headroom. */
+#if RP2040_PIZERO
+/* RP2040-PiZero has only 264 KB SRAM — trim to free heap for AGI resources.
+   20 KB is still ample for AGI's call/new_room recursion + FatFs + USB. */
+static uint8_t core0_stack[20 * 1024] __attribute__((aligned(16)));
+#else
 static uint8_t core0_stack[32 * 1024] __attribute__((aligned(16)));
+#endif
 
 static void agi_main(void);
 

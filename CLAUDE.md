@@ -69,6 +69,27 @@ Requires Pico SDK 2.2.0, `PICO_BOARD=pico2` (RP2350 / Pico 2). The `tinyagi_dvi`
 target is guarded by `if(EXISTS pico_lib/dvi/CMakeLists.txt)` — if the `pico_lib`
 submodule isn't checked out, only picocalc/restouch build.
 
+### RP2040-PiZero DVI target (fourth target — separate build)
+
+`PICO_BOARD`/`PICO_PLATFORM` is global to a configure, so the RP2040 target can't
+coexist with the three RP2350 (pico2) targets in one build — it needs its **own build
+dir** with `-DTINYAGI_RP2040_PIZERO=ON`:
+
+```bash
+cd tinyagi-rp2350
+mkdir -p build_rp2040 && cd build_rp2040
+cmake .. -DPICO_SDK_PATH=/home/chneeb/Source/pico-sdk -DCMAKE_BUILD_TYPE=Release -DTINYAGI_RP2040_PIZERO=ON
+make -j$(nproc)          # produces tinyagi_dvi_rp2040.uf2 only
+```
+
+The option flips `PICO_BOARD` to `pico` (RP2040/M0+) and builds **only** `tinyagi_dvi_rp2040`
+(the pico2 targets are guarded out). This target **reuses the entire `dvi/` port** — the
+board-specific bits are switched by the `RP2040_PIZERO=1` compile def inside `dvi/display.cpp`
+(TMDS pins), `dvi/hw_config.c` (SD bus), `dvi/kbd_input.c` (USB), and `dvi/tusb_config.h` (USB
+roles). **Motivation**: the RP2040-PiZero routes +5 V to its mini-HDMI connector (HDMI pin 18),
+so its DVI works on **regular TVs**; the RP2350-PiZero does not (see the pin-18 note under Known
+issues). Status: **working on RP2040 hardware** (SD menu, flash caching, SQ1/SQ2 play).
+
 ### Per-target compile definitions
 
 | Define | PicoCalc | RESTOUCH | DVI |
@@ -142,6 +163,37 @@ A/B'd marginally worse, including with audio).
   on **audio-decoding** monitors it can still glitch the DVI signal (see open issues) — the
   bus-priority hardening that used to mask that has been removed, so if a specific audio
   monitor mis-behaves, building with `SOUND_ENABLED=0 DVI_HDMI_AUDIO=0` is the fallback.
+
+### DVI on RP2040 (`tinyagi_dvi_rp2040`) — Waveshare RP2040-PiZero
+Same `dvi/` port, `RP2040_PIZERO=1` switches the board-specific bits. pico_lib supports RP2040
+(uses the interpolator/LUT TMDS encoder, `DVI_USE_SIO_TMDS_ENCODER=0`, since RP2040 has no SIO
+TMDS encoder). Differences vs the RP2350-PiZero:
+- **TMDS pins GPIO 26/24/22 (Blue/Green/Red), clock 28** (`dvi/display.cpp`) — all ≤29, so **no**
+  `PICO_PIO_USE_GPIO_BASE`. 252 MHz, vreg 1.20 V (same). 640×480@60, RGB555 (same).
+- **Keyboard: native USB host** on rhport 0 (`tuh_init(0)`), **not** PIO-USB — because GPIO 28 is
+  the DVI clock here (PIO-USB D+ sat on 28 on RP2350). So no PIO-USB, and **no USB-CDC console**
+  (native controller is the host; console is UART only, `DVI_ENABLE_CDC=0`). Proven approach:
+  msxemulator does the same on this board. `dvi/kbd_input.c`/`tusb_config.h` guard on `RP2040_PIZERO`.
+- **SD on spi0**: SCK=18, MOSI=19, MISO=20, CS=21 (onboard microSD; `dvi/hw_config.c`).
+- **`DVI_DOUBLE_BUFFER=0` (required)**: RP2040 has 264 KB SRAM. The 64 KB scanout buffer won't fit,
+  so scanout is live off the framebuffer (some tearing possible; the flash cache keeps loads short
+  so it's not noticeable in practice). To claw back heap, `core0_stack` is trimmed 32→20 KB and
+  `core1_stack` 8→4 KB **on RP2040 only** (RP2350 targets keep the larger stacks — the trims are
+  `#if RP2040_PIZERO`). That leaves **~77 KB AGI heap**; static use is ~180 KB of the 256 KB striped
+  region (fb 64 KB + priority 27 KB + `pic_vispri` 27 KB + stacks + libs).
+- **Heap is tight but workable**: SQ1/SQ2 play from the flash cache. It can still OOM on the
+  heaviest rooms (a failed resource `malloc` → `panic()` → core0 halts, core1 freezes the frame).
+  The next lever if needed is 4-bit-packing the framebuffer (64→32 KB), but that adds a nibble
+  unpack to core1's live-scan hot loop (timing risk). The two 27 KB priority buffers are **not**
+  a free reclaim: `pic_vispri` is the static picture (already vis+pri packed), `priority_buffer`
+  composites sprite+text priority over it (and stores 255 for text, so it won't 4-bit-pack).
+- **No HDMI audio** (`SOUND_ENABLED=0`, `DVI_HDMI_AUDIO=0`) — the sound *sequencer* still runs for
+  timing (see "Sound timing decoupled…"), so sound-paced logic is correct but silent. PWM audio on
+  a spare GPIO is a possible add (the RP2040-PiZero, unlike the RP2350-PiZero, has free pins).
+- **`PICO_FLASH_SIZE_BYTES=16 MB`** (the RP2040-PiZero's real size; littlefs cache = 15 MB, ~28
+  games at ~0.5 MB each). Keeps the DMA-poll SD driver + keep-alive timer.
+- **Status: works on RP2040 hardware** — SD menu, cache-to-flash, and playing SQ1/SQ2 from flash
+  all confirmed. Console is UART only (`panic()` → UART).
 
 ## Key design decisions & fixes applied
 
@@ -297,6 +349,13 @@ archive (`DVI_EMBED_GAME`, kept as a guarded single-game test path) and then pro
   lowercase names and **only copies AGI resources** (`logdir/picdir/viewdir/snddir/object/
   words.tok/vol.*` via `is_agi_resource()`) — not the DOS `AGI` exe / overlays / docs. SD is
   **optional** — cached games play with no card inserted.
+- **Cache full / free-space UX**: the chooser header shows `Flash: <n.n>M free / <total>M` via
+  `flashfs_df()` (`lfs_fs_size()` → used; total = `FLASHFS_SIZE`), computed on entry and after each
+  R/D (not per-keypress). `flashfs_df()` is guarded by `mounted` + `lfs_fs_size() >= 0`, so it
+  reports "full free, 0 used" and never faults if the fs is unmounted or corrupt. If a cache
+  **fails** (flash full / mid-copy error) the `R` handler deletes the partial cache
+  (`flashfs_delete_game`) and shows "Cache FAILED" — you never get a broken `[flash]` entry.
+  A ~0.5 MB game fits ~28× in the DVI targets' 15 MB region (restouch's is 3 MB).
 - **Compile-gated by `FLASHFS_ENABLED`** (in sdcard.c too): with the cache off (picocalc) the
   `R`/`D` hints are hidden, the keys are no-ops, and there is **no flash-write path at all** (no
   init/format, cache/delete compiled out, saves → SD) so the cache region is never touched.
