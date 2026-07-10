@@ -175,18 +175,25 @@ TMDS encoder). Differences vs the RP2350-PiZero:
   (native controller is the host; console is UART only, `DVI_ENABLE_CDC=0`). Proven approach:
   msxemulator does the same on this board. `dvi/kbd_input.c`/`tusb_config.h` guard on `RP2040_PIZERO`.
 - **SD on spi0**: SCK=18, MOSI=19, MISO=20, CS=21 (onboard microSD; `dvi/hw_config.c`).
-- **`DVI_DOUBLE_BUFFER=0` (required)**: RP2040 has 264 KB SRAM. The 64 KB scanout buffer won't fit,
-  so scanout is live off the framebuffer (some tearing possible; the flash cache keeps loads short
-  so it's not noticeable in practice). To claw back heap, `core0_stack` is trimmed 32→20 KB and
-  `core1_stack` 8→4 KB **on RP2040 only** (RP2350 targets keep the larger stacks — the trims are
-  `#if RP2040_PIZERO`). That leaves **~77 KB AGI heap**; static use is ~180 KB of the 256 KB striped
-  region (fb 64 KB + priority 27 KB + `pic_vispri` 27 KB + stacks + libs).
-- **Heap is tight but workable**: SQ1/SQ2 play from the flash cache. It can still OOM on the
-  heaviest rooms (a failed resource `malloc` → `panic()` → core0 halts, core1 freezes the frame).
-  The next lever if needed is 4-bit-packing the framebuffer (64→32 KB), but that adds a nibble
-  unpack to core1's live-scan hot loop (timing risk). The two 27 KB priority buffers are **not**
-  a free reclaim: `pic_vispri` is the static picture (already vis+pri packed), `priority_buffer`
-  composites sprite+text priority over it (and stores 255 for text, so it won't 4-bit-pack).
+- **4-bit packed double buffer (`DVI_PACKED_FB=1`, RP2040 only)**: RP2040's 264 KB SRAM has no room
+  for an 8-bit scanout buffer (hence `DVI_DOUBLE_BUFFER=0`). Instead the framebuffer stores **2
+  pixels/byte** (4-bit — AGI is 16 colours, lossless), so framebuffer (32 KB) + scanout (32 KB) =
+  64 KB — the *same* RAM one 8-bit framebuffer used. This gives **double-buffering (no flicker) at
+  zero extra RAM**: `flush_display()` packs+copies fb→scanout once per cycle; core1 unpacks 2 px/byte
+  in its scan loop (**half** the SRAM reads of 8-bit, so ~neutral on its tight timing — this is why
+  it fits where HDMI audio didn't). `screen_set_320`/`lcd_putchar` do a nibble read-modify-write;
+  `screen_set_160` writes a full byte (both nibbles). All gated `#if DVI_PACKED_FB` in
+  `dvi/display.cpp` (with a `fb_put()` helper) — **RP2350 keeps its 8-bit double buffer untouched**
+  (`DVI_PACKED_FB=0` → the `#else` original paths). Confirmed on RP2040 *and* RP2350 hardware.
+- To claw back heap, `core0_stack` is trimmed 32→20 KB and `core1_stack` 8→4 KB **on RP2040 only**
+  (`#if RP2040_PIZERO`). That leaves **~77 KB AGI heap**; static use ~180 KB of the 256 KB striped
+  region (fb 32 KB + scanout 32 KB + priority 27 KB + `pic_vispri` 27 KB + stacks + libs).
+- **Heap is tight but workable**: SQ1/SQ2/PQ1 play from the flash cache. It can still OOM on the
+  heaviest rooms (failed resource `malloc` → `panic()` → core0 halts, core1 freezes the frame). The
+  packing is spent on double-buffering (RAM-neutral), so it didn't free heap; the two 27 KB priority
+  buffers are **not** a free reclaim either (`pic_vispri` is already vis+pri packed; `priority_buffer`
+  composites sprite+text priority and stores 255 for text). Further heap would need smaller stack
+  trims or engine-side resource eviction.
 - **No HDMI audio** (`SOUND_ENABLED=0`, `DVI_HDMI_AUDIO=0`) — the sound *sequencer* still runs for
   timing (see "Sound timing decoupled…"), so sound-paced logic is correct but silent. **HDMI audio
   was tried and does NOT work on RP2040**: enabling it broke the DVI signal (background went red +
@@ -195,13 +202,11 @@ TMDS encoder). Differences vs the RP2350-PiZero:
   RP2350-only feature. The viable path here is **PWM audio on a spare GPIO** (e.g. GPIO6 like
   msxemulator) — ~0 RAM, core0/IRQ-driven so no core1 impact — but it needs an external
   speaker/amp (not the TV). Not yet implemented.
-- **Flicker (live-scan)**: moving sprites can flicker because core1 scans the framebuffer while
-  core0 redraws it (no double buffer). A **beam-sync attempt was tried and reverted**
-  (`platform_frame_sync()` parking core0 until the beam left the content rows): it helped the
-  flicker slightly but made the **Police Quest 1 character stop rendering** (SQ1's Roger was fine)
-  — the interaction with PQ1's `display()`-overlay rendering wasn't pinned down. Don't reintroduce
-  it naively. The zero-RAM "real" fix remains 4-bit-packing both framebuffer + a scanout buffer
-  (double-buffering within the same 64 KB), at the cost of a nibble unpack in core1's hot loop.
+- **Flicker: FIXED** by the 4-bit packed double buffer above — core1 never scans a half-drawn frame.
+  (Historical: a **beam-sync attempt** — `platform_frame_sync()` parking core0 until the beam left
+  the content rows — was tried first and **reverted**; it helped flicker slightly but made the
+  **PQ1 character stop rendering** (SQ1 was fine). Don't reintroduce it; the packed double buffer is
+  the right fix.)
 - **`PICO_FLASH_SIZE_BYTES=16 MB`** (the RP2040-PiZero's real size; littlefs cache = 15 MB, ~28
   games at ~0.5 MB each). Keeps the DMA-poll SD driver + keep-alive timer.
 - **Status: works on RP2040 hardware** — SD menu, cache-to-flash, and playing SQ1/SQ2 from flash

@@ -54,25 +54,56 @@ static const uint16_t agi_palette555[16] = {
     0x7FFF,  /* 15 White        #FFFFFF */
 };
 
-static uint8_t framebuffer[320 * 200];
 static uint8_t priority_buffer[160 * 168];
 
 /* DVI_DOUBLE_BUFFER: core1 scans a dedicated front buffer instead of the live
  * framebuffer; flush_display() copies the composed framebuffer into it once per
- * game cycle.  This holds the previous frame on screen through a room load
- * (which blanks the framebuffer via text_screen()/clear_lines) instead of
- * showing the black intermediate — matches PicoCalc's hold-display behaviour,
- * and removes most tearing.  Costs +64 KB SRAM.  SCAN_BUF is whatever core1
- * scans (and what the chooser/Loading UI draws to), so single-buffer behaviour
- * is byte-identical to before. */
+ * game cycle.  This holds the previous frame through a room load and removes
+ * tearing.  Costs +64 KB SRAM at 8-bit.  RP2350 uses this.
+ *
+ * DVI_PACKED_FB (default on for RP2040): store 2 pixels per byte (4-bit — AGI is
+ * 16 colours, lossless).  The framebuffer AND a scanout buffer then fit in 32 KB
+ * each = 64 KB total — the same RAM as a single 8-bit framebuffer — so RP2040
+ * gets double-buffering (no flicker) at NO extra RAM.  Core1 unpacks two pixels
+ * per byte (half the SRAM reads of 8-bit, so ~neutral on its tight timing);
+ * screen_set_320 / lcd_putchar do a nibble read-modify-write. */
 #ifndef DVI_DOUBLE_BUFFER
 #define DVI_DOUBLE_BUFFER 1
 #endif
-#if DVI_DOUBLE_BUFFER
-static uint8_t scanout_buffer[320 * 200];
+#ifndef DVI_PACKED_FB
+#if RP2040_PIZERO
+#define DVI_PACKED_FB 1
+#else
+#define DVI_PACKED_FB 0
+#endif
+#endif
+
+#if DVI_PACKED_FB
+#define FB_BYTES  (320 * 200 / 2)   /* 2 px/byte */
+#define FB_STRIDE 160               /* bytes per row */
+#else
+#define FB_BYTES  (320 * 200)
+#define FB_STRIDE 320
+#endif
+/* A scanout buffer (flush copies into it) exists for both the 8-bit and packed
+   double buffers; live single-buffer scans the framebuffer directly. */
+#define DVI_HAS_SCANOUT (DVI_DOUBLE_BUFFER || DVI_PACKED_FB)
+
+static uint8_t framebuffer[FB_BYTES];
+#if DVI_HAS_SCANOUT
+static uint8_t scanout_buffer[FB_BYTES];
 #define SCAN_BUF scanout_buffer
 #else
 #define SCAN_BUF framebuffer
+#endif
+
+#if DVI_PACKED_FB
+/* Set pixel (x,y) to 4-bit colour c in a packed buffer; x&1 selects the nibble. */
+static inline void fb_put(uint8_t *buf, int x, int y, uint8_t c) {
+    uint8_t *b = &buf[y * FB_STRIDE + (x >> 1)];
+    if (x & 1) *b = (uint8_t)((*b & 0x0F) | (c << 4));
+    else       *b = (uint8_t)((*b & 0xF0) | (c & 0x0F));
+}
 #endif
 
 #define DVI_H       240
@@ -204,9 +235,17 @@ static void __not_in_flash_func(core1_dvi_loop)(void) {
             uint16_t *dst = lb->data();
             int agi_y = y - V_MARGIN;
             if (agi_y >= 0 && agi_y < 200) {
-                const uint8_t *src = &SCAN_BUF[agi_y * 320];
+                const uint8_t *src = &SCAN_BUF[agi_y * FB_STRIDE];
+#if DVI_PACKED_FB
+                for (int x = 0; x < 320; x += 2) {
+                    uint8_t b = src[x >> 1];
+                    dst[x]     = agi_palette555[b & 0x0F];
+                    dst[x + 1] = agi_palette555[b >> 4];
+                }
+#else
                 for (int x = 0; x < 320; x++)
                     dst[x] = agi_palette555[src[x] & 0x0F];
+#endif
                 memset(dst + 320, 0, (DVI_W - 320) * sizeof(uint16_t));
             } else {
                 memset(dst, 0, DVI_W * sizeof(uint16_t));
@@ -288,7 +327,7 @@ extern "C" uint8_t font_data[2048];  /* defined in platform.c; 256 glyphs x 8 ro
 void display_init(void) {
     memset(framebuffer,     0, sizeof(framebuffer));
     memset(priority_buffer, 0, sizeof(priority_buffer));
-#if DVI_DOUBLE_BUFFER
+#if DVI_HAS_SCANOUT
     memset(scanout_buffer,  0, sizeof(scanout_buffer));  /* no garbage before first flush */
 #endif
     dvi_inst = new dvi::DVI(pio0, &dvi_cfg, dvi::getTiming640x480p60Hz());
@@ -337,9 +376,10 @@ extern "C" void dvi_audio_write(const int16_t *mono, int n) {
 #endif /* DVI_HDMI_AUDIO */
 
 void flush_display(void) {
-#if DVI_DOUBLE_BUFFER
+#if DVI_HAS_SCANOUT
     /* Publish the composed frame to the buffer core1 scans, so only completed
-       frames are shown (no black flash mid room-load). Called once per cycle. */
+       frames are shown (no tearing/flicker mid-cycle). Called once per cycle.
+       32 KB when packed, 64 KB at 8-bit. */
     memcpy(scanout_buffer, framebuffer, sizeof(framebuffer));
 #else
     /* Single-buffer: no-op — core1 scans the live framebuffer directly. */
@@ -348,13 +388,22 @@ void flush_display(void) {
 
 void screen_set_160(int x, int y, int color) {
     if ((unsigned)x >= 160 || (unsigned)y >= 200) return;
+#if DVI_PACKED_FB
+    /* The two adjacent 320-px pixels are the two nibbles of one packed byte. */
+    framebuffer[y * FB_STRIDE + x] = (uint8_t)(((color & 0x0F) << 4) | (color & 0x0F));
+#else
     framebuffer[y * 320 + x * 2]     = (uint8_t)color;
     framebuffer[y * 320 + x * 2 + 1] = (uint8_t)color;
+#endif
 }
 
 void screen_set_320(int x, int y, int color) {
     if ((unsigned)x >= 320 || (unsigned)y >= 200) return;
+#if DVI_PACKED_FB
+    fb_put(framebuffer, x, y, (uint8_t)color);
+#else
     framebuffer[y * 320 + x] = (uint8_t)color;
+#endif
 }
 
 int priority_get(int x, int y) {
@@ -386,9 +435,14 @@ static void lcd_putchar(char c) {  /* internal helper — not part of public API
         uint8_t bits = glyph[row];
         /* Draw straight to the scanned buffer — the pre-game chooser/Loading UI
            has no compose+flush cycle behind it. */
+#if DVI_PACKED_FB
+        for (int col = 0; col < 8; col++)
+            fb_put(SCAN_BUF, base_x + col, fy, (bits & (0x80u >> col)) ? 15 : 0);
+#else
         uint8_t *line = &SCAN_BUF[fy * 320 + base_x];
         for (int col = 0; col < 8; col++)
             line[col] = (bits & (0x80u >> col)) ? 15 : 0;
+#endif
     }
     text_col++;
 }
