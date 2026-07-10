@@ -284,8 +284,8 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/pico_lib/dvi/CMakeLists.txt)
         DVI_ENABLE_CDC=0               # native USB is the HID host; console = UART only
         DVI_KEEPALIVE_TIMER=1
         DVI_DOUBLE_BUFFER=0            # 264 KB SRAM: no room for the 64 KB scanout buffer
-        SOUND_ENABLED=0                # no HDMI audio on RP2040 yet; sequencer still times sound
-        DVI_HDMI_AUDIO=0
+        SOUND_ENABLED=0                # HDMI audio breaks DVI timing on RP2040 (core1 can't carry
+        DVI_HDMI_AUDIO=0               # TMDS + data islands); sequencer still runs for timing. TODO: PWM.
         KB_ENTER_CODE=0x0D
         KB_F10_CODE=0x8A
         SYS_CLOCK_KHZ=252000

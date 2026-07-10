@@ -188,8 +188,20 @@ TMDS encoder). Differences vs the RP2350-PiZero:
   a free reclaim: `pic_vispri` is the static picture (already vis+pri packed), `priority_buffer`
   composites sprite+text priority over it (and stores 255 for text, so it won't 4-bit-pack).
 - **No HDMI audio** (`SOUND_ENABLED=0`, `DVI_HDMI_AUDIO=0`) — the sound *sequencer* still runs for
-  timing (see "Sound timing decoupled…"), so sound-paced logic is correct but silent. PWM audio on
-  a spare GPIO is a possible add (the RP2040-PiZero, unlike the RP2350-PiZero, has free pins).
+  timing (see "Sound timing decoupled…"), so sound-paced logic is correct but silent. **HDMI audio
+  was tried and does NOT work on RP2040**: enabling it broke the DVI signal (background went red +
+  flickering = per-scanline timing missed), because RP2040's core1 does software interp+LUT TMDS
+  (no SIO encoder) and has no slack for the extra data-island work. So HDMI audio is an
+  RP2350-only feature. The viable path here is **PWM audio on a spare GPIO** (e.g. GPIO6 like
+  msxemulator) — ~0 RAM, core0/IRQ-driven so no core1 impact — but it needs an external
+  speaker/amp (not the TV). Not yet implemented.
+- **Flicker (live-scan)**: moving sprites can flicker because core1 scans the framebuffer while
+  core0 redraws it (no double buffer). A **beam-sync attempt was tried and reverted**
+  (`platform_frame_sync()` parking core0 until the beam left the content rows): it helped the
+  flicker slightly but made the **Police Quest 1 character stop rendering** (SQ1's Roger was fine)
+  — the interaction with PQ1's `display()`-overlay rendering wasn't pinned down. Don't reintroduce
+  it naively. The zero-RAM "real" fix remains 4-bit-packing both framebuffer + a scanout buffer
+  (double-buffering within the same 64 KB), at the cost of a nibble unpack in core1's hot loop.
 - **`PICO_FLASH_SIZE_BYTES=16 MB`** (the RP2040-PiZero's real size; littlefs cache = 15 MB, ~28
   games at ~0.5 MB each). Keeps the DMA-poll SD driver + keep-alive timer.
 - **Status: works on RP2040 hardware** — SD menu, cache-to-flash, and playing SQ1/SQ2 from flash
