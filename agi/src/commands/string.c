@@ -86,8 +86,21 @@ void parse(uint8_t str) {
 	system_state.num_parsed_word_groups = 0;
 	parse_word_groups();
 
+	// parse() presents the string as freshly-entered input. Clear the
+	// "said already accepted this cycle" latch (FLAG_4) so a said() after this
+	// parse can still match — otherwise, if an earlier said() (e.g. the command
+	// that opened the search dialogue) consumed the command-line input this
+	// cycle, the re-parsed string is ignored and the player must type it twice.
+	state.flags[FLAG_4_SAID_ACCEPTED_INPUT] = false;
+
 	if (system_state.num_parsed_word_groups > 0)
 		state.flags[FLAG_2_COMMAND_ENTERED] = true;
+
+	// input_buffer/input_pos were only scratch for the word-group parser — the
+	// text came from a string var (get.string), not the command line. Clear them
+	// so the parsed string doesn't linger on the command prompt after the dialogue.
+	system_state.input_buffer[0] = '\0';
+	system_state.input_pos = 0;
 }
 
 void set_string(uint8_t str, uint8_t msg) {

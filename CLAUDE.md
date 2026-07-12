@@ -453,6 +453,21 @@ Some AGI logics implement wait-for-keypress as a tight `goto` loop in bytecode t
 ### new_room() cleanup
 Clears `system_state.input_buffer` / `input_pos` so text entered in one room (or via `parse()`) doesn't bleed into the next room's prompt.
 
+### parse() resets FLAG_4 and clears the command line (get.string search fix)
+`parse(str)` (`commands/string.c`) re-parses a string var as if freshly typed — used by the
+`get.string` search dialogues (SQ1 data-archive "astral body" search; also the name-entry screen).
+Two fixes make those work:
+- **Reset `FLAG_4_SAID_ACCEPTED_INPUT` after re-parsing.** `said()` (`commands/test.c`) has an
+  "already accepted this cycle" latch: once a `said()` matches it sets `FLAG_4`, and later `said()`s
+  that cycle return false. The archive flow is `said("search")` → `get.string` → `parse()` →
+  `said("astral body")` all in **one** cycle, so the opening `said("search")` had already set
+  `FLAG_4` → the post-parse `said()` was ignored and you had to type the search **twice**. `parse()`
+  now clears `FLAG_4` so the re-parsed input matches first try.
+- **Clear `input_buffer`/`input_pos` after parsing.** `parse()` fills them only as scratch for the
+  word-group parser, but the text came from a string var (get.string), not the command line — left
+  set, it **lingered on the command prompt** after the dialogue closed (e.g. "astral body", or the
+  entered name after the intro). Cleared now.
+
 ### move_obj() restores player control on completion
 `move_obj()` for ego (object 0) calls `program_control()` when the move starts. When the move completes, `player_control()` is called automatically (`object_view.c`, inside `update_object()`). This matches the AGI spec. Without this, Roger would be permanently frozen after any animated room-entry walk (e.g. SQ1 room 9).
 
@@ -607,7 +622,7 @@ The following return without doing anything; they don't crash:
 Implemented and working. No "Game saved" / "Game restored" dialog is shown — this is intentional.
 
 ## Tested games
-- **Space Quest 1** — plays through correctly; menu, F1, quit, save/restore all work. Library computer terminal (text_screen mode) works. Typing "exit" at the terminal falls through silently (correct — word group 157 is not handled by the library logic; type an unrecognised word or press ESC to close the terminal cleanly).
+- **Space Quest 1** — plays through correctly; menu, F1, quit, save/restore all work. Library / data-archive computer (text_screen mode) works, incl. the "astral body" `get.string` search — matches first try and leaves no leftover text on the prompt (see "parse() resets FLAG_4…"). Typing "exit" at the terminal falls through silently (correct — word group 157 is not handled by the library logic; type an unrecognised word or press ESC to close the terminal cleanly).
 - **Space Quest 2** — plays through correctly including intro sequence.
 - **Police Quest 1** — partially tested. Newspaper room (Logic 116) renders correctly with the rendering-order fix; character sprite appears as a dark silhouette on idle frames (see display overlay buffer TODO). Exit via "close paper", "put down paper", or "stop reading".
 
