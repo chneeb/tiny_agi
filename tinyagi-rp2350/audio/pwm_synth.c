@@ -17,7 +17,18 @@ const float num_sine_curves_per_sec = sample_rate_hz / (float)25;
 
 pwm_synth_audio_channel_state_t pwm_synth_channels[PWM_SYNTH_NUM_CHANNELS];
 
+/* Output mute (driven by FLAG_9_SOUND_ENABLED via pwm_synth_set_muted). The
+ * sequencer keeps running (timing preserved for sound-paced logic); only the
+ * audio output is silenced. Checked by both output paths (PWM ISR + HDMI render). */
+static volatile bool pwm_synth_muted = false;
+void pwm_synth_set_muted(bool m) { pwm_synth_muted = m; }
+
 void __not_in_flash_func(pih)() {
+    if (pwm_synth_muted) {              /* silence = mid-scale PWM level */
+        pwm_set_both_levels(slice_num, 127, 127);
+        pwm_clear_irq(slice_num);
+        return;
+    }
     uint16_t combined_samples = 0;
 
     for (size_t i = 0; i < PWM_SYNTH_NUM_CHANNELS; i++)
@@ -87,6 +98,10 @@ void pwm_synth_silence_all_channels() {
 // Mirrors pih()'s mix, but centred/scaled to signed 16-bit and rate-parameterised
 // so it stays in tune at 44100 Hz while the PWM path keeps its native 22050 Hz.
 void pwm_synth_render(int16_t *out, int count, float sample_rate) {
+    if (pwm_synth_muted) {                      /* sound off: emit silence */
+        for (int i = 0; i < count; i++) out[i] = 0;
+        return;
+    }
     const float ncps = sample_rate / 25.0f;   // matches num_sine_curves_per_sec
     for (int j = 0; j < count; j++) {
         uint16_t combined = 0;

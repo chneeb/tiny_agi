@@ -14,6 +14,7 @@
 // example, are shown *while a sound is playing* and only advance when it ends.
 // SOUND_ENABLED gates only the audio *output* (PWM / HDMI), not this timing.
 #include "agi_sound_player/agi_sound.h"
+#include "audio/pwm_synth.h"   // pwm_synth_set_muted() — FLAG_9 output mute
 
 // -----------------------------------------------------------------------
 // Game location set by main() after the chooser runs.
@@ -187,6 +188,10 @@ void check_key(void) {
 // Sound
 // -----------------------------------------------------------------------
 void platform_tick_sound(void) {
+    /* Runtime Sound on/off (menu / F2): FLAG_9 mutes the audio *output* only —
+       the sequencer keeps running below so sound-paced logic stays timed. */
+    pwm_synth_set_muted(!state.flags[FLAG_9_SOUND_ENABLED]);
+
     static uint32_t last_ms = 0;
     static uint32_t accum_ms = 0;
     static bool first_call = true;

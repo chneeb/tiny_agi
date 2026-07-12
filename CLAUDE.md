@@ -581,8 +581,15 @@ Fix: add a 40×25 character-cell overlay buffer (`char_overlay[25][40]`, `fg_ove
 
 Note: this is distinct from the `agi_text_mode` path — games that call `text_screen()` (e.g. SQ1 library) already suppress sprite drawing entirely and don't need the overlay.
 
-### Sound on/off toggle is cosmetic (known)
-`FLAG_9_SOUND_ENABLED` is read only in `display.c` (status line text) and `interpreter.c` (redraw trigger). The audio path in `commands/sound.c` does **not** check it — `sound()` always calls `agi_play_sound()` and currently-playing sounds aren't stopped when the flag flips. Toggling Sound Off via the menu / F2 updates the status line but the game keeps playing sounds. To fix: gate `sound()` on the flag (and still set the completion flag so logic waiting for sound-done doesn't hang), and call `agi_stop_sound()` when the flag transitions true→false (the interpreter already tracks `previous_sound_status`).
+### Sound on/off toggle (FLAG_9) — FIXED via output mute
+`FLAG_9_SOUND_ENABLED` (default true — `state.c:92`; toggled by the game's menu / F2) now actually
+silences audio. `platform_tick_sound()` calls `pwm_synth_set_muted(!FLAG_9)` every cycle, and both
+output paths — the PWM ISR (`pih`, picocalc) and the HDMI render (`pwm_synth_render`, RP2350 DVI) —
+emit silence when muted. It mutes only the **output**: the sound *sequencer* keeps running
+(`agi_sound_tick`), so sound-paced logic stays correctly timed and the sound-done flag still fires at
+the sound's natural end (consistent with "Sound timing decoupled from audio output"). So `sound()` /
+`stop_sound()` are unchanged — no "complete immediately" hack, no timing regression, no hang. Harmless
+no-op on `SOUND_ENABLED=0` targets (restouch/RP2040), which have no audio output anyway.
 
 ### restart_game() not implemented
 Stubbed — will panic if called. Not yet triggered by SQ1/SQ2/PQ1.
