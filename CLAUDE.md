@@ -545,11 +545,13 @@ masked the non-audio case has since been removed (it didn't help overall). Remai
 audio sink rejects — see the fix hints under "DVI: HDMI data-island audio". Fallback for a
 mis-behaving audio monitor: build with `SOUND_ENABLED=0 DVI_HDMI_AUDIO=0`.
 
-### DVI: horizontal is left-half only (not full-screen)
-The 320-pixel AGI frame is written 1:1 into the left 320 of the 640-wide DVI line, so game
-content occupies the left half with the right half black. True full-screen needs horizontal
-2× (pixel-doubling into all 640), but naive doubling made the 8px chooser font "fat"; a clean
-fix is a mode flag that doubles for the game but renders text 1:1, or a 640-wide text path.
+### DVI: horizontal — left 320 of the line (works well in practice, low priority)
+The 320-pixel AGI frame is written 1:1 into the left 320 of the 640-wide DVI line, right half
+black (`display.cpp` core1 loop + `memset(dst + 320, …)`). **In practice this displays fine** —
+tested TVs scale the picture to fill the screen, so it looks full-screen and correct; not worth
+changing. If a true 640-wide fill were ever wanted, horizontal 2× pixel-doubling would do it, but
+naive doubling makes the 8px chooser font "fat" — it'd need a mode flag that doubles the game but
+renders text 1:1 (or a 640-wide text path). **Low priority / effectively a non-issue.**
 
 ### DVI: double-buffer — DONE
 Implemented (`DVI_DOUBLE_BUFFER=1`, default): core1 scans a `scanout_buffer` that `flush_display()`
@@ -589,12 +591,37 @@ inserted** the failed SD init left the bus at ~100–400 kHz, so the TFT crawled
 access (see "Shared-bus baud" under Flash game/save cache). LCD is now always 80 MHz and SD always
 12.5 MHz, regardless of order. (Bonus: LCD is faster than the old 12.5-MHz-after-SD behaviour too.)
 
-### Display overlay buffer (not yet implemented)
-`display()` calls write text to the main framebuffer. On idle cycles (no keypress), the game logic may not redraw that text, but `agi_draw_all_active()` still runs and draws sprites over the retained text. This makes sprites visible over persistent display-based overlays such as the PQ1 newspaper (which uses `clear_text_rect()` + `display()` each cycle, but only when a key is pressed).
+### Display overlay buffer (not yet implemented — plan documented)
+**Problem.** `display()` (`commands/display.c:46`) draws text via `_draw_text` → `_draw_char`
+(`text_display.c`) → `screen_set_320` into the framebuffer. The per-cycle order in `interpreter.c`
+is `agi_draw_all_active()` (sprites, ~:663) → `execute_logic_cycle()` (~:665, which only *repaints*
+`display()` text on a keypress). So on **idle** cycles the logic doesn't repaint the text and the
+sprite is drawn over it → e.g. PQ1's character shows as a silhouette over the newspaper (PQ1 uses
+`clear_text_rect()` + `display()` each cycle, but only when a key is pressed).
 
-Fix: add a 40×25 character-cell overlay buffer (`char_overlay[25][40]`, `fg_overlay[25][40]`, `bg_overlay[25][40]`) in `display.c`. When `display()` writes a character, also record it in the overlay. When `clear_text_rect()` or `clear_lines()` clears an area, also clear those overlay cells. After `agi_draw_all_active()` in interpreter.c, call `apply_display_overlay()` to composite the overlay back over the framebuffer. Clear the overlay on `graphics()` and `new_room()`. ~50–60 lines across display.c, interpreter.c, control_flow.c. Adds ~3 KB of state.
+**Planned fix — a cell-based overlay that re-composites `display()` text over sprites** (engine
+code, benefits all targets; ~50–60 lines):
+- **State** in `text_display.c`: `char_overlay[25][40]` + `attr_overlay[25][40]` (fg<<4 | bg, both
+  0–15) = **~2 KB packed** (vs ~3 KB with separate fg/bg arrays). Plus an `overlay_mode` flag
+  (off / record / clear). Note: it's `.bss`, so on the RAM-tight RP2040 it comes out of the ~77 KB
+  heap (→ ~75 KB) — consider a compile flag if that bites, since PQ1 is the RAM-heavy case.
+- **Hooks** (all funnel through `_draw_char`, the single text choke point):
+  1. `display()` wraps its `_draw_text` in `overlay_mode = record` → each drawn cell captured at
+     `row = start_y/8, col = start_x/8` (bounds-check <25 / <40).
+  2. `clear_text_rect()` / `clear_lines()` wrap in `overlay_mode = clear` → cleared cells removed.
+  3. New `apply_display_overlay()` redraws every non-empty overlay cell via `_draw_char` (mode off,
+     so it doesn't re-record). Called in `interpreter.c` **after** `execute_logic_cycle()`, guarded
+     by `!agi_text_mode` (matches the sprite-draw guard) → text always ends up on top.
+  4. Clear the whole overlay on `graphics()` (`display.c:59`), `text_screen()` (`:156`), and
+     `new_room()` (`control_flow.c:53`).
+- `_draw_char` already tags text pixels with priority 255, so re-applying each cycle is idempotent.
+- **Correctness risk to watch:** the overlay persists text until *explicitly* cleared. PQ1 and the
+  tested games are well-behaved (they clear via `clear_text_rect`/`clear_lines`/room change). A game
+  that paints a **picture over display-text without calling a clear** would get stale text redrawn
+  over it — narrow, but worth checking when broadening game testing.
 
-Note: this is distinct from the `agi_text_mode` path — games that call `text_screen()` (e.g. SQ1 library) already suppress sprite drawing entirely and don't need the overlay.
+Note: distinct from the `agi_text_mode` path — games that call `text_screen()` (e.g. SQ1 library)
+suppress sprite drawing entirely and don't need the overlay.
 
 ### Sound on/off toggle (FLAG_9) — FIXED via output mute
 `FLAG_9_SOUND_ENABLED` (default true — `state.c:92`; toggled by the game's menu / F2) now actually
