@@ -118,12 +118,15 @@ pico_add_extra_outputs(tinyagi_picocalc)
 add_executable(tinyagi_restouch
     ${COMMON_SOURCES}
     ${AUDIO_SOURCES}
+    audio/i2s_output.c             # I2S DAC output (Pico Audio shield on GP26/27/28)
     ${FATFS_DIR}/sd_driver/spi.c   # stock SD driver
     restouch/display.c
     restouch/lcdspi.c
     restouch/kbd_input.c
     restouch/hw_config.c
 )
+# Generate audio_i2s.pio.h for the I2S output
+pico_generate_pio_header(tinyagi_restouch ${CMAKE_CURRENT_SOURCE_DIR}/audio/audio_i2s.pio)
 
 target_include_directories(tinyagi_restouch PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -134,7 +137,10 @@ target_include_directories(tinyagi_restouch PRIVATE
 )
 
 target_compile_definitions(tinyagi_restouch PRIVATE
-    SOUND_ENABLED=0
+    SOUND_ENABLED=1              # I2S DAC output (was 0 = silent)
+    I2S_AUDIO=1                  # external I2S DAC via PIO+DMA (not PWM/HDMI)
+    I2S_DATA_PIN=26             # Pico Audio shield: DIN
+    I2S_CLOCK_PIN_BASE=27       # BCK=27, LRCK=28
     KB_ENTER_CODE=0x0D
     KB_F10_CODE=0x8A
     FLASHFS_ENABLED=1             # flash game/save cache on (faster loads + SD-optional play; the
@@ -168,6 +174,7 @@ target_link_libraries(tinyagi_restouch
     hardware_spi
     hardware_i2c
     hardware_dma
+    hardware_pio
     hardware_pwm
     hardware_irq
     hardware_flash

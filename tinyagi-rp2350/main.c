@@ -9,6 +9,9 @@
 #if SOUND_ENABLED
 #include "audio/pwm_synth.h"
 #include "agi_sound_player/agi_sound.h"
+#if I2S_AUDIO
+#include "audio/i2s_output.h"
+#endif
 #endif
 
 #include "display.h"
@@ -187,6 +190,8 @@ int main(void) {
     dvi_audio_init();   /* after display_init: dvi_inst exists */
     static struct repeating_timer audio_timer;
     add_repeating_timer_ms(2, audio_producer_cb, NULL, &audio_timer);
+#elif I2S_AUDIO
+    i2s_output_init();  /* external I2S DAC (e.g. RESTOUCH + Pico Audio shield) */
 #else
     pwm_synth_init(AUDIO_PIN);
 #endif

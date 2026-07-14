@@ -94,7 +94,7 @@ issues). Status: **working on RP2040 hardware** (SD menu, flash caching, SQ1/SQ2
 
 | Define | PicoCalc | RESTOUCH | DVI |
 |---|---|---|---|
-| `SOUND_ENABLED` | 1 | 0 | 1 (HDMI data-island audio) |
+| `SOUND_ENABLED` | 1 | 1 (I2S DAC) | 1 (HDMI data-island audio) |
 | `KB_ENTER_CODE` | 0x0A | 0x0D | 0x0D |
 | `KB_F10_CODE` | 0x90 | 0x8A | 0x8A |
 | `SYS_CLOCK_KHZ` | 133000 | 300000 | 252000 (21×12 MHz, PIO-USB) |
@@ -134,9 +134,10 @@ A/B'd marginally worse, including with audio).
 - SPI1 shared by LCD (DC=8, CS=9, CLK=10, MOSI=11, RST=15, BL=13) and SD (CS=22, MISO=12).
 - Touch CS (GP16) parked HIGH — touch not used.
 - M5Stack CardKB on i2c1 (SDA=GP2, SCL=GP3, I2C addr 0x5F).
-- No audio hardware; SOUND_ENABLED=0 compiles out the audio *output* (no PWM). The sound
-  *sequencer* still runs for timing so sound-paced logic (e.g. the intro) stays in sync — see
-  "Sound timing decoupled from audio output".
+- Audio via an **external I2S DAC** (e.g. a Waveshare Pico Audio shield): DIN=GP26, BCK=GP27,
+  LRCK=GP28. `SOUND_ENABLED=1` + `I2S_AUDIO=1` (was silent). Uses PIO0 + 2 DMA channels, fully
+  independent of the LCD (hardware spi1) — see "I2S audio output". Confirmed on hardware. Without a
+  DAC connected it just drives those pins harmlessly.
 
 ### DVI (`tinyagi_dvi`) — Waveshare RP2350-PiZero (RP2350B)
 - RP2350B at **252 MHz** (vreg boost 1.20 V). 252 = 21×12 MHz, required by PIO-USB.
@@ -304,9 +305,9 @@ Enabling audio glitches the DVI signal on **some monitors** (screen black, monit
 Mitigation for now: shipped off (`SOUND_ENABLED=0` + `DVI_HDMI_AUDIO=0`); code stays behind the flag.
 
 ### Sound timing decoupled from audio output (all targets)
-The AGI sound **sequencer** (`agi_sound_player/agi_sound.c`) runs on **every** target, including
-`SOUND_ENABLED=0` (restouch). `SOUND_ENABLED` now gates only the audio **output** (PWM on
-picocalc, HDMI data-island on DVI); the sequencer's **timing** always runs. This matters because
+The AGI sound **sequencer** (`agi_sound_player/agi_sound.c`) runs on **every** target, even when
+audio output is off. `SOUND_ENABLED` now gates only the audio **output** (PWM on picocalc, HDMI
+data-island on DVI, I2S DAC on restouch); the sequencer's **timing** always runs. This matters because
 sound-paced game logic keys off the sound-done flag: e.g. the SQ1 intro plays a sound arming flag
 162 and shows each title card (incl. "Sarien Encounter") **while that sound is playing** (`f162`
 still false), advancing only when it ends. `platform_tick_sound()` (called every cycle from
@@ -321,6 +322,28 @@ completion flag at the sound's **real** end. On no-output targets the sequencer 
   so those targets are behaviorally unchanged (the HDMI-audio output path is untouched).
 - The sequencer is pure data (no hardware): `agi_sound_start/tick` only touch `pwm_synth_channels[]`
   and `pwm_synth_silence_all_channels()` (zeroes the table) — safe without `pwm_synth_init()`.
+
+### I2S audio output (restouch — external DAC)
+`audio/i2s_output.c` + `audio/audio_i2s.pio` drive an external I2S DAC (a Waveshare Pico Audio
+shield: **DIN=GP26, BCK=GP27, LRCK=GP28**). Gated by `I2S_AUDIO=1` (+`SOUND_ENABLED=1`); `main.c`'s
+audio-init picks it via `#elif I2S_AUDIO`. Reuses the shared pipeline unchanged — the sequencer
+sets `pwm_synth_channels[]`, `pwm_synth_render()` mixes to mono int16; `i2s_output` duplicates
+mono→L/R into 32-bit I2S words. Structure:
+- **PIO0 SM** runs the vendored `audio_i2s.pio` (RPi BSD; 16-bit stereo, side-set BCLK/LRCK).
+  Clkdiv `sysclk*4/rate` (msxemulator's proven formula); 22050 Hz.
+- **Two DMA channels chain to each other** (gapless ping-pong) with a read-address **ring** wrapping
+  each 256-sample (1 KB, aligned) buffer. A 4 ms repeating timer tops up whichever buffer just went
+  idle (buffers are ~11.6 ms, so it catches every swap). No DMA IRQ → no contention with SD.
+- **Fully independent of the display** (LCD is hardware spi1; both PIOs were free) — audio can't
+  disturb the picture. Uses `pio_claim_unused_sm` / `dma_claim_unused_channel`, so no fixed-resource
+  clashes. Confirmed on hardware.
+- Respects the Sound on/off toggle for free (`pwm_synth_render()` returns silence when FLAG_9 muted).
+- Ported from msxemulator's I2S (same DAC scheme on the RP2040-PiZero). Could also serve DVI/RP2040
+  or picocalc if a DAC is wired (it's a generic `I2S_AUDIO` output stage), but only enabled on
+  restouch for now.
+- **Known: AGI sound tempo feels slightly slow** — but this is **not** I2S-specific (observed on
+  other targets too), so it's a shared **sequencer-tempo** question (`agi_sound.c` / the 60 Hz tick
+  in `platform_tick_sound()`), not an output-path issue. Not yet investigated.
 
 ### DVI: DMA bus priority — tried and REMOVED
 `display_init()` used to set `bus_ctrl_hw->priority = DMA_R | DMA_W` (DVI scan-out DMA wins bus
