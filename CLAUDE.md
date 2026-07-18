@@ -568,6 +568,24 @@ masked the non-audio case has since been removed (it didn't help overall). Remai
 audio sink rejects — see the fix hints under "DVI: HDMI data-island audio". Fallback for a
 mis-behaving audio monitor: build with `SOUND_ENABLED=0 DVI_HDMI_AUDIO=0`.
 
+### RP2350-PiZero: no 5 V on HDMI pin 18 / USB — TV + USB-host both fail (hardware; SETTLED)
+The Waveshare **RP2350**-PiZero does **not** route VBUS/5 V to its connectors. Two symptoms, one
+root cause:
+- **HDMI pin 18 (+5 V source-present)** is absent → many **TVs show nothing** (they gate on that
+  rail to detect a live source; PC monitors are usually more lenient).
+- The **USB port isn't 5 V-powered** → it **can't power a USB keyboard** as a host.
+
+**Signaling mode is NOT the cause** (ruled out): pico_lib supports full HDMI mode with the AVI
+InfoFrame (`enableDataIsland()` / `setAudioFreq()` in `pico_lib/dvi/dvi.cpp`), and **msx2pico already
+runs in that mode on this board** — the TV still stays dark. So DVI-vs-HDMI (`useDVIModeForHDMI`-style)
+toggling can't fix it; no software change conjures a missing power rail.
+
+**Fix = hardware**: inject 5 V — VSYS → 100 Ω → HDMI pin 18 (and likewise to USB VBUS for a
+keyboard). The mini-HDMI connector is too small to solder easily. **The practical answer is the
+RP2040-PiZero**, which *does* route 5 V → its DVI works on regular TVs and its native-USB host powers
+a keyboard (this is why `tinyagi_dvi_rp2040` exists — see the RP2040 build target). Don't re-investigate
+this as a signal/mode problem.
+
 ### DVI: horizontal — left 320 of the line (works well in practice, low priority)
 The 320-pixel AGI frame is written 1:1 into the left 320 of the 640-wide DVI line, right half
 black (`display.cpp` core1 loop + `memset(dst + 320, …)`). **In practice this displays fine** —
