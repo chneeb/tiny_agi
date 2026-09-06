@@ -45,7 +45,12 @@ tinyagi-rp2350/        Merged RP2350 port — PicoCalc and RESTOUCH as two CMake
   patches/             Standalone patches not applied to the tree (e.g. dircache_faster_loads.patch)
   pico_lib/            Shuichi Takano's pico DVI library (submodule) — PIO TMDS, NOT HSTX
 
-tinyagi-glfw/          Desktop GLFW port (reference; not actively developed)
+tinyagi-sdl/           Desktop SDL2 port (Linux/macOS/Windows) — engine dev & debugging
+  main.c               Display (streaming texture), keyboard, SDL audio out, game loop
+  platform.c           File I/O (case-insensitive name map), saves, sound glue, panic
+  font.c               8x8 CP437 font table (copy of the one in rp2350/platform.c)
+
+tinyagi-glfw/          Old Windows-only GLFW port — superseded by tinyagi-sdl, not built
 
 tools/
   agi_disasm.py        AGI Logic bytecode disassembler (Python 3, no dependencies)
@@ -117,6 +122,34 @@ plus `PICO_PIO_USE_GPIO_BASE=1`, `PICO_DEFAULT_PIO_USB_DP_PIN=28`. The DVI targe
 compiles a **patched SD driver** (`dvi/sd_spi_poll.c`) instead of the stock `spi.c` — see
 "DVI: SD read via DMA poll" below. `DVI_DMA_BUS_PRIORITY` was tried and **removed** (no help;
 A/B'd marginally worse, including with audio).
+
+### Desktop SDL2 port (`tinyagi-sdl`)
+
+```bash
+cd tinyagi-sdl
+cmake -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build -j$(nproc)
+./build/tinyagi_sdl ~/Downloads/quest/sq1            # window is 320x200 x3
+```
+
+Requires `libsdl2-dev`. Options: `--scale N`, `--save FILE`, plus debug aids that make
+the port scriptable headlessly — `--frames N` (run N cycles then exit), `--shot FILE.bmp`
+(dump the final frame), `--room N` (jump straight into a room), `--ego X,Y` (park ego at
+a spot), `--ego-pri N` (give ego a fixed priority), `--pri` (priority-buffer overlay, same as TAB), `--keys "…"` (replay keystrokes:
+`^v<>` are the arrows, `\n` is Enter, `.` idles a beat), and `--pic N` / `--dump-pic FILE`
+(draw one picture and dump its raw visual+priority screens). Together they give a headless
+smoke test:
+
+```bash
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+  ./build/tinyagi_sdl ~/Downloads/quest/sq1 --frames 2000 --shot /tmp/sq1.bmp
+```
+
+The point of this target is engine work: gdb/ASan/valgrind and instant rebuilds for the
+platform-independent code in `agi/`, which is where the remaining known issues live (the
+display-overlay buffer, the PQ1 silhouette, the sound-tempo question). It reuses the AGI
+sound sequencer and synth mixer from `tinyagi-rp2350/` verbatim, so audio behaviour matches
+the boards.
 
 ## Hardware
 
@@ -303,6 +336,34 @@ Enabling audio glitches the DVI signal on **some monitors** (screen black, monit
   packet scheduling under `N_LINE_PER_DATA=2` line-doubling) or something the specific sink is
   strict about — needs a capture/analyzer or a known-good HDMI-audio reference to pin down.
 Mitigation for now: shipped off (`SOUND_ENABLED=0` + `DVI_HDMI_AUDIO=0`); code stays behind the flag.
+
+### Desktop SDL port — notes
+- **Engine untouched.** `agi/` needed no changes; the port implements only the ~20
+  functions in `platform_support.h`. `screen_set_160/320`, `priority_*` and the
+  `platform_tick_sound()` pacing are transcribed from `tinyagi-rp2350/platform.c` and
+  `picocalc/display.c` (same 8-bit indexed framebuffer + EGA palette model).
+- **Case-insensitive filenames (the one real porting problem).** The engine asks for bare
+  lowercase names (`"logdir"`, `"object"`, `sprintf("vol.%d")` in `vol.c:38`); FatFs is
+  case-insensitive but Linux is not, and real game dirs are usually uppercase (`LOGDIR`,
+  `VOL.0`). `platform_scan_game_dir()` scans the directory once and `resolve_path()` maps
+  lowercase → the actual on-disk name.
+- **Shared audio: `audio/pwm_synth.c` split into `pwm_synth_core.c` + the PWM backend.**
+  The core (channel table, mute flag, `pwm_synth_render()`, the `strings` wavetable) has no
+  hardware dependency and is now compiled by every backend — PWM ISR, I2S, HDMI data-island
+  and the SDL audio callback. `pwm_synth.c` keeps only the Pico PWM output stage and gets
+  `strings`/`sample_length`/`pwm_synth_muted` via `pwm_synth.h`. `agi_sound.c/.h` lost their
+  stray `pico/stdlib.h` include. Behaviour on the boards is unchanged (same code, same file
+  split boundary as the existing `pwm_synth_render` users). **Hardware-confirmed on
+  PicoCalc** (PWM audio still plays; KQ1/SQ1/SQ2 briefly played through).
+- **Trap: `audio/strings.h` shadows the C library's `<strings.h>`** (it is the wavetable, and
+  its array is literally named `strings`, which `<string.h>` pulls in on glibc). So
+  `tinyagi-rp2350/audio` is deliberately *not* an include directory in `tinyagi-sdl`; the two
+  shared headers are included by relative path. Also: `strings.h` *defines* the array, so
+  exactly one TU per binary may include it (that TU is now `pwm_synth_core.c`).
+- **Audio thread.** The SDL callback runs on its own thread and only advances
+  `sample_pos`; the game thread only writes `.hz` — the same split the PWM ISR has.
+- Verified: SQ1 and SQ2 boot and play through their (sound-paced) intros; the shared
+  sequencer times the title cards correctly. TAB toggles the priority-buffer overlay.
 
 ### Sound timing decoupled from audio output (all targets)
 The AGI sound **sequencer** (`agi_sound_player/agi_sound.c`) runs on **every** target, even when
