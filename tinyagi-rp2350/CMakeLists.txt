@@ -61,6 +61,7 @@ set(COMMON_SOURCES
 
 set(AUDIO_SOURCES
     audio/pwm_synth.c
+    audio/pwm_synth_core.c
     agi_sound_player/agi_sound.c
 )
 

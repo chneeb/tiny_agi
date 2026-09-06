@@ -1,4 +1,5 @@
-#include "pico/stdlib.h"
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 
 #include "agi_sound.h"

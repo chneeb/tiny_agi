@@ -12,6 +12,7 @@ typedef struct {
 extern pwm_synth_audio_channel_state_t pwm_synth_channels[PWM_SYNTH_NUM_CHANNELS];
 
 extern void pwm_synth_init(int pwm_pin_base);
+
 extern void pwm_synth_silence_all_channels();
 
 /* Mute/unmute the audio *output* (both the PWM ISR and the HDMI render path)
@@ -23,3 +24,9 @@ extern void pwm_synth_set_muted(bool muted);
  * channel state (same 3-channel sine mix as the PWM path).  Used by the DVI
  * HDMI-audio output instead of the PWM sink; advances channel sample_pos. */
 extern void pwm_synth_render(int16_t *out, int count, float sample_rate);
+
+/* Shared synth internals, defined in pwm_synth_core.c. Output backends (PWM ISR,
+ * I2S, HDMI, SDL) mix from these directly. */
+extern const int sample_length;
+extern signed char strings[];   /* sine wavetable, defined via strings.h there */
+extern volatile bool pwm_synth_muted;
