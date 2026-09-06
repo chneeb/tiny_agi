@@ -45,9 +45,13 @@ cell_t* _object_cell(const object_t* obj) {
 	return _get_cell(obj->view_no, obj->loop_no, obj->cel_no);
 }
 
+// Resolve the background priority under a view pixel.  Priorities 0-3 are
+// control lines (obstacle / conditional obstacle / water / trigger), not real
+// priority bands -- the interpreter searches downwards for the first real
+// band, which starts at 4 (the value _clear_screen() fills the pic with).
 uint8_t _get_pri(int x, int y, bool add_to_pic) {
 	uint8_t pri;
-	while ((pri = add_to_pic ? pic_pri_get(x, y) : priority_get(x, y)) < 3) {
+	while ((pri = add_to_pic ? pic_pri_get(x, y) : priority_get(x, y)) < 4) {
 		y++;
 		if (y > 167)
 			return 0;

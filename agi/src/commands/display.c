@@ -38,6 +38,12 @@ void close_window()
 
 void configure_screen(uint8_t pPlaytop, uint8_t pInputLine, uint8_t pStatusLine)
 {
+	// Moving the input line leaves the old prompt (and its cursor) behind:
+	// KQ1 configures (0,21,0) and then (1,22,0), so without this the row-21
+	// prompt stays on screen next to the live one on row 22.
+	if (pInputLine != state.input_line_row)
+		clear_lines(state.input_line_row, state.input_line_row, 0);
+
 	state.play_top = pPlaytop;
 	state.input_line_row = pInputLine;
 	state.status_line = pStatusLine;

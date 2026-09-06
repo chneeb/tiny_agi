@@ -70,6 +70,16 @@ void new_room(uint8_t room_no)
 			obj->active = false;
 			obj->drawn = false;
 		}
+		// Real AGI clears the per-object mode flags every room: new.room
+		// de-animates every object, so the room's animate.obj() re-initialises
+		// it (animate_obj() only early-returns while the object is *still*
+		// active). We deliberately keep ego active/drawn across rooms, so that
+		// early return always fires for ego and its fixed priority would live
+		// forever. KQ1 calls set.priority(ego, 15) in outdoor rooms (2, 6, 21,
+		// 22, 31 - bridges and water), and leaking it made ego draw over
+		// everything in later rooms, e.g. the hanging lamp in the castle hall.
+		obj->has_fixed_priority = false;
+
 		obj->update = true;
 		obj->old_view_no = -1;
 		obj->step_size = obj->step_time = obj->steps_to_next_update = obj->cycle_time = obj->cycles_to_next_update = 1;

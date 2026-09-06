@@ -54,6 +54,8 @@ tinyagi-glfw/          Old Windows-only GLFW port — superseded by tinyagi-sdl,
 
 tools/
   agi_disasm.py        AGI Logic bytecode disassembler (Python 3, no dependencies)
+  agi_pic_ref.py       Reference AGI picture renderer — independent second opinion
+                       on the engine's visual/priority screens (AGI v2 only)
 ```
 
 ## Build
@@ -364,6 +366,9 @@ Mitigation for now: shipped off (`SOUND_ENABLED=0` + `DVI_HDMI_AUDIO=0`); code s
   `sample_pos`; the game thread only writes `.hz` — the same split the PWM ISR has.
 - Verified: SQ1 and SQ2 boot and play through their (sound-paced) intros; the shared
   sequencer times the title cards correctly. TAB toggles the priority-buffer overlay.
+- **It already paid for itself**: the two KQ1 bugs below (double prompt cursor, ego
+  drawn over foreground scenery) were both root-caused here, the second by diffing all
+  82 KQ1 pictures against `tools/agi_pic_ref.py`.
 
 ### Sound timing decoupled from audio output (all targets)
 The AGI sound **sequencer** (`agi_sound_player/agi_sound.c`) runs on **every** target, even when
@@ -530,6 +535,57 @@ Some AGI logics implement wait-for-keypress as a tight `goto` loop in bytecode t
 
 ### new_room() clears FLAG_3 (ego touched trigger)
 `new_room()` explicitly resets `FLAG_3_EGO_TOUCHED_TRIGGER`. Without this, the flag set by `update_all_active()` in the previous room's cycle carries over, causing trigger-zone death checks in the new room's logic to fire immediately on the first cycle (e.g. SQ1 vehicle bay room 8 death when entering from room 9).
+
+### new_room() clears fixed object priority (KQ1 "ego walks over everything")
+Real AGI clears the per-object mode flags on every room change: `new.room` de-animates
+every object, so the room's `animate.obj()` re-initialises it (`animate_obj()` only
+early-returns while the object is *still* active). Our `new_room()` deliberately keeps ego
+active/drawn across rooms, so for ego that early return **always** fires and the flags
+`animate_obj()` would have reset survive forever.
+
+`has_fixed_priority` is the one that bites: KQ1 calls `set.priority(ego, 15)` in its outdoor
+rooms (2, 6, 21, 22, 31 — bridges and water) and doesn't always release it, so ego kept
+priority 15 and was drawn **in front of everything** in later rooms — the reported symptom
+was the oil lamp in the castle hall (room 55) not covering him. `new_room()` now clears
+`has_fixed_priority` for all objects. Confirmed both ways with `--ego-pri 15`: set it and ego
+covers the lamp, set it *before* the room change and he is correctly hidden.
+
+Note the same leak class applies to the other flags `animate_obj()` resets — `ignore_horizon`,
+`fix_loop`, `ignore_objects`, `ignore_blocks`, `allowed_on` (KQ1 uses `set.obj.on.water` for
+swimming). They are **not** cleared yet; if a "ego can suddenly only walk on water" or a
+horizon-related oddity shows up after a room change, this is the first place to look.
+
+### Picture flood fill: the visual screen bounds the fill (KQ1 priority fix)
+`_flood_fill()` (`commands/picture.c`) used to stop on *both* screens: `vis != 15` **and**
+`pri != <priority at the seed pixel>`. Real AGI (and `tools/agi_pic_ref.py`, which follows
+ScummVM's `GfxPicture`) uses one boundary: **when the visual screen is enabled it alone
+bounds the fill** — the priority colour is painted wherever the visual fill reaches — and
+only a *priority-only* fill (`pri_enabled && !vis_enabled`) is bounded by `pri != 4` (4 being
+what `_clear_screen()` leaves). The extra condition truncated priority regions wherever the
+priority screen already held something, leaving foreground scenery with no priority, so ego
+walked in front of it. Symptom: KQ1's cloud rooms (pic 56) had a priority-0 band along the
+bottom instead of the 13/14 foreground bands.
+
+Verified by diffing every picture against the reference renderer: KQ1 82/82, KQ3 86/86 now
+match exactly (before: KQ1 pics 2, 56 and 79 differed), KQ2 differs on 1 pixel and SQ1 on 5,
+both in pen-plot (`0xFA`) areas that *both* renderers simplify differently. SQ2 can't be
+compared — it is AGI v3, whose picture resources the reference doesn't decompress.
+
+### Priorities 0-3 are control lines, not bands (KQ1 priority fix)
+`_get_pri()` (`view.c`) resolves the background priority under a view pixel by searching
+*downwards* past control lines. It searched while `pri < 3`, i.e. it treated priority **3**
+as a real band. All four of 0-3 are control (obstacle / conditional obstacle / water /
+trigger); real bands start at **4**, which is why `_clear_screen()` fills the priority screen
+with 4 and `y_to_priority()` clamps to a minimum of 4. Because 3 is below every object
+priority, `priority >= bgPri` was always true over a trigger line, so ego was drawn in front
+of whatever should have covered him there. KQ1 leans on this heavily — priority 3 covers
+~136 k pixels across its 82 pictures.
+
+### configure_screen() clears the old input line
+Moving the input line left the old prompt *and its cursor* on screen: KQ1 calls
+`configure_screen(0, 21, 0)` and then `(1, 22, 0)`, so the row-21 prompt stayed next to the
+live row-22 one — two cursors, only the lower one accepting text. `configure_screen()`
+(`commands/display.c`) now clears the old row when `pInputLine` changes.
 
 ### get_message() bounds guard
 `message_no` is 1-indexed; passing 0 causes a `uint16_t` underflow to 65535, producing a wild pointer. Guard: `if (message_no >= message_section[0]) return "";`
@@ -753,6 +809,9 @@ Implemented and working. No "Game saved" / "Game restored" dialog is shown — t
 ## Tested games
 - **Space Quest 1** — plays through correctly; menu, F1, quit, save/restore all work. Library / data-archive computer (text_screen mode) works, incl. the "astral body" `get.string` search — matches first try and leaves no leftover text on the prompt (see "parse() resets FLAG_4…"). Typing "exit" at the terminal falls through silently (correct — word group 157 is not handled by the library logic; type an unrecognised word or press ESC to close the terminal cleanly).
 - **Space Quest 2** — plays through correctly including intro sequence.
+- **King's Quest 1** — plays; the castle rooms, the prompt and foreground-scenery
+  occlusion were the subject of the four fixes above (double cursor, flood-fill bounds,
+  control-line resolution).
 - **Police Quest 1** — partially tested. Newspaper room (Logic 116) renders correctly with the rendering-order fix; character sprite appears as a dark silhouette on idle frames (see display overlay buffer TODO). Exit via "close paper", "put down paper", or "stop reading".
 
 Per-target notes: PicoCalc and RESTOUCH play the above. The **DVI** target boots, runs the

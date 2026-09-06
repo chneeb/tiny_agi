@@ -67,8 +67,14 @@ void _draw_line(uint8_t x1, uint8_t y1, uint8_t x2, uint8_t y2) {
 	}
 }
 
-bool can_fill(uint8_t x, uint8_t y) {
-	return pic_vis_get(x, y) == 15 || pic_pri_get(x, y) == 4;
+// True where the fill must stop.  When the visual screen is enabled it alone
+// bounds the fill (the priority colour is painted wherever the visual fill
+// reaches); a priority-only fill is bounded by "priority already set", i.e.
+// != 4, the value _clear_screen() leaves behind.
+static bool _fill_boundary(uint8_t x, uint8_t y) {
+	if (pri_enabled && !vis_enabled)
+		return pic_pri_get(x, y) != 4;
+	return pic_vis_get(x, y) != 15;
 }
 
 void _flood_fill(uint8_t startX, uint8_t startY)
@@ -86,16 +92,12 @@ void _flood_fill(uint8_t startX, uint8_t startY)
 #define push(x,y) { enqueue(x); enqueue(y); }
 
 	push(startX, startY);
-	uint8_t start_pri = pic_pri_get(startX, startY);
 
 	while (wp != rp) {
 		uint8_t x = pop();
 		uint8_t y = pop();
 
-		bool vis_stop = vis_enabled && pic_vis_get(x, y) != 15;
-		bool pri_stop = pri_enabled && pic_pri_get(x, y) != start_pri;
-
-		if (vis_stop || pri_stop)
+		if (_fill_boundary(x, y))
 			continue;
 
 		_pset(x, y);
